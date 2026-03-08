@@ -1,15 +1,12 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import os
+from supabase import create_client
 
-st.set_page_config(page_title="QuantMarkets", page_icon="📈", layout="wide")
+SUPABASE_URL = "https://xrvqvrmylwltptyqyjfd.supabase.co"
+SUPABASE_KEY = "sb_publishable_35Mqfnw7XJItQCyTX2vY9Q__m4APn2_"
 
-st.title("📈 QuantMarkets")
-st.subheader("Backtesting engine for prediction markets")
-st.markdown("---")
-
-CSV_FILE = os.path.expanduser("~/Documents/quantmarkets/market_prices.csv")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def categorize(question):
     q = question.lower()
@@ -26,18 +23,25 @@ def categorize(question):
     else:
         return "Other"
 
+st.set_page_config(page_title="QuantMarkets", page_icon="📈", layout="wide")
+st.title("📈 QuantMarkets")
+st.subheader("Backtesting engine for prediction markets")
+st.markdown("---")
+
 @st.cache_data(ttl=3600)
 def load_data():
-    if not os.path.exists(CSV_FILE):
-        return pd.DataFrame()
-    df = pd.read_csv(CSV_FILE)
+    response = supabase.table("market_prices").select("*").execute()
+    df = pd.DataFrame(response.data)
+    if df.empty:
+        return df
+    df["mid_price"] = pd.to_numeric(df["mid_price"], errors="coerce")
     df["category"] = df["event_ticker"].apply(categorize)
     return df
 
 df_raw = load_data()
 
 if df_raw.empty:
-    st.warning("No data collected yet. Run collector.py first.")
+    st.warning("No data yet.")
     st.stop()
 
 # Get first and latest snapshot per market
@@ -52,11 +56,9 @@ df_markets["price_change_pct"] = ((df_markets["price_change"] / df_markets["mid_
 st.sidebar.title("Filters")
 min_prob = st.sidebar.slider("Min opening probability", 0.0, 1.0, 0.05, 0.05)
 max_prob = st.sidebar.slider("Max opening probability", 0.0, 1.0, 0.95, 0.05)
-
 categories = ["All"] + sorted(df_markets["category"].unique().tolist())
 category_filter = st.sidebar.selectbox("Category", categories)
-
-sort_by = st.sidebar.selectbox("Sort markets by", ["Opening Price", "Current Price", "Price Change", "Close Date"])
+sort_by = st.sidebar.selectbox("Sort by", ["Opening Price", "Current Price", "Price Change", "Close Date"])
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Data Pipeline")
@@ -70,22 +72,16 @@ df = df[(df["mid_price"] >= min_prob) & (df["mid_price"] <= max_prob)]
 if category_filter != "All":
     df = df[df["category"] == category_filter]
 
-sort_map = {
-    "Opening Price": "mid_price",
-    "Current Price": "current_price",
-    "Price Change": "price_change",
-    "Close Date": "close_time"
-}
+sort_map = {"Opening Price": "mid_price", "Current Price": "current_price", "Price Change": "price_change", "Close Date": "close_time"}
 df = df.sort_values(sort_map[sort_by], ascending=False).reset_index(drop=True)
 
-# Top metrics
+# Metrics
 st.markdown("## 📊 Market Overview")
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Markets tracked", len(df))
 col2.metric("Avg opening price", f"{df['mid_price'].mean():.2%}")
 col3.metric("Biggest mover", f"{df['price_change_pct'].abs().max():.1f}%")
 col4.metric("Categories", df["category"].nunique())
-
 st.markdown("---")
 
 # Charts
@@ -97,9 +93,8 @@ with col_left:
     colors = ["#6C47FF", "#00C2A8", "#DC2626", "#F59E0B", "#3B82F6"]
     fig, ax = plt.subplots()
     ax.bar(cat_counts.index, cat_counts.values, color=colors[:len(cat_counts)])
-    ax.set_xlabel("Category")
-    ax.set_ylabel("Number of Markets")
     plt.xticks(rotation=20, ha="right")
+    ax.set_ylabel("Number of Markets")
     st.pyplot(fig)
 
 with col_right:
@@ -128,5 +123,3 @@ st.subheader("📋 Market Browser")
 display_df = df[["category", "event_ticker", "mid_price", "current_price", "price_change_pct", "close_time"]].copy()
 display_df.columns = ["Category", "Market", "Opening Price", "Current Price", "Change %", "Closes"]
 st.dataframe(display_df, use_container_width=True)
-
-
