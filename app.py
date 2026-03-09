@@ -250,3 +250,80 @@ if st.button("▶ Run Backtest"):
         ax_bt.set_ylabel("Cumulative Price Change")
         ax_bt.set_title("Cumulative Performance")
         st.pyplot(fig_bt)
+
+st.markdown("---")
+
+# Smart Bet Recommender
+st.markdown("## 💰 Smart Bet Recommender")
+st.markdown("Tell us your budget, target return, and risk tolerance — we'll find the best markets for you right now.")
+
+rec_col1, rec_col2, rec_col3 = st.columns(3)
+
+with rec_col1:
+    budget = st.number_input("Budget ($)", min_value=10, max_value=100000, value=100, step=10)
+
+with rec_col2:
+    target_return = st.number_input("Target profit ($)", min_value=5, max_value=100000, value=50, step=5)
+
+with rec_col3:
+    risk_level = st.selectbox("Risk tolerance", ["Low", "Medium", "High"])
+
+rec_category = st.selectbox("Preferred category", ["All"] + sorted(df_markets["category"].unique().tolist()), key="rec_cat")
+
+if st.button("🎯 Find Best Bets"):
+
+    if risk_level == "Low":
+        rec_df = df_markets[(df_markets["current_price"] >= 0.65) & (df_markets["current_price"] <= 0.95)]
+        risk_label = "Low risk — high probability markets"
+    elif risk_level == "Medium":
+        rec_df = df_markets[(df_markets["current_price"] >= 0.35) & (df_markets["current_price"] <= 0.65)]
+        risk_label = "Medium risk — contested markets"
+    else:
+        rec_df = df_markets[(df_markets["current_price"] >= 0.05) & (df_markets["current_price"] <= 0.35)]
+        risk_label = "High risk — contrarian markets"
+
+    if rec_category != "All":
+        rec_df = rec_df[rec_df["category"] == rec_category]
+
+    if rec_df.empty:
+        st.warning("No markets match your criteria. Try adjusting your filters.")
+    else:
+        rec_df = rec_df.copy()
+        rec_df["payout_if_yes"] = (1 / rec_df["current_price"]).round(2)
+
+        # Sort by best probability first
+        rec_df = rec_df.sort_values("current_price", ascending=False).reset_index(drop=True)
+
+        # Allocate budget evenly across top markets
+        max_bets = min(10, len(rec_df))
+        bet_per_market = round(budget / max_bets, 2)
+        rec_df = rec_df.head(max_bets)
+        rec_df["bet_amount"] = bet_per_market
+        rec_df["potential_profit"] = ((rec_df["payout_if_yes"] - 1) * rec_df["bet_amount"]).round(2)
+        rec_df["pct_of_budget"] = ((rec_df["bet_amount"] / budget) * 100).round(1)
+
+        st.markdown(f"### Top Bets — {risk_label}")
+
+        s_col1, s_col2, s_col3 = st.columns(3)
+        s_col1.metric("Markets found", len(rec_df))
+        s_col2.metric("Avg probability", f"{rec_df['current_price'].mean():.2%}")
+        s_col3.metric("Avg payout per $1", f"{rec_df['payout_if_yes'].mean():.2f}x")
+
+        st.markdown("#### Recommended Bets")
+        bet_display = rec_df[[
+            "event_ticker", "category", "current_price",
+            "payout_if_yes", "bet_amount", "potential_profit", "close_time"
+        ]].copy()
+        bet_display.columns = [
+            "Market", "Category", "Current Probability",
+            "Payout per $1", "Bet Amount ($)", "Potential Profit ($)", "Closes"
+        ]
+        st.dataframe(bet_display.reset_index(drop=True), use_container_width=True)
+
+        total_bet = rec_df["bet_amount"].sum()
+        total_profit = rec_df["potential_profit"].sum()
+        st.markdown("---")
+        p_col1, p_col2, p_col3 = st.columns(3)
+        p_col1.metric("Total capital deployed", f"${total_bet:.2f}")
+        p_col2.metric("% of budget used", f"{(total_bet/budget*100):.1f}%")
+        p_col3.metric("Total potential profit", f"${total_profit:.2f}")
