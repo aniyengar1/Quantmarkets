@@ -10,10 +10,10 @@
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg:        #0F1C12;
-    --surface:   #152019;
-    --border:    #1E3322;
-    --border2:   #2A4830;
+    --bg:        #080F09;
+    --surface:   #0D1810;
+    --border:    #162818;
+    --border2:   #1E3822;
     --text:      #E8F5E2;
     --muted:     #4A7050;
     --dim:       #7AAB80;
@@ -65,14 +65,14 @@
   .nav-cta { color: #0A1A0C !important; background: var(--accent) !important; padding: 10px 24px !important; border-radius: 3px; font-family: 'Syne', sans-serif !important; font-weight: 700 !important; }
 
   #hero { position: relative; width: 100vw; height: 100vh; overflow: hidden; display: flex; align-items: center; }
-  #bgCanvas { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.65; }
+  #bgCanvas { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.45; }
 
-  .hero-content { position: relative; z-index: 2; padding: 0 8vw; max-width: 920px; }
+  .hero-content { position: relative; z-index: 2; padding: 140px 8vw 0; max-width: 920px; }
 
   .eyebrow { font-family: 'DM Mono', monospace; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--accent); margin-bottom: 28px; opacity: 0; animation: fadeUp 0.8s ease 0.2s forwards; }
 
   .hero-title { font-size: clamp(52px, 8vw, 112px); font-weight: 800; line-height: 0.95; letter-spacing: -0.04em; margin-bottom: 32px; opacity: 0; animation: fadeUp 0.9s ease 0.4s forwards; }
-  .hero-title .hollow { color: transparent; -webkit-text-stroke: 1.5px rgba(232,245,226,0.18); }
+  .hero-title .hollow { color: transparent; -webkit-text-stroke: 1.5px rgba(232,245,226,0.35); }
   .hero-title .shimmer {
     background: linear-gradient(120deg, #5DED7A 0%, #A8E8B0 30%, #F0C060 55%, #5DED7A 80%);
     background-size: 200% auto;
@@ -191,6 +191,7 @@
 
 <section id="hero">
   <canvas id="bgCanvas"></canvas>
+  <div style="position:absolute;inset:0;z-index:1;background:linear-gradient(to right, rgba(8,15,9,0.75) 0%, rgba(8,15,9,0.3) 60%, transparent 100%);pointer-events:none;"></div>
   <div class="hero-content">
     <p class="eyebrow">Prediction Market Intelligence</p>
     <h1 class="hero-title">
