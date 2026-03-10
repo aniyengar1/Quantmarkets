@@ -214,21 +214,112 @@ def apply_layout(fig, title="", height=300):
 # ── helpers ───────────────────────────────────────────────────────────────────
 def categorize(question):
     q = question.lower()
-    if any(x in q for x in ["trump","president","election","congress","senate","biden",
-                              "republican","democrat","ukraine","russia","china","taiwan",
-                              "ceasefire","tariff","fed","federal reserve","interest rate","inflation","gdp"]):
+
+    # ── Politics & Macro ──────────────────────────────────────────────────────
+    if any(x in q for x in [
+        "trump","biden","harris","obama","president","vice president",
+        "election","midterm","primary","ballot","vote","voter","polling",
+        "congress","senate","house of representatives","speaker","filibuster",
+        "republican","democrat","gop","liberal","conservative","party",
+        "ukraine","russia","putin","zelenskyy","nato","ceasefire","sanctions",
+        "china","taiwan","xi jinping","hong kong","south china sea",
+        "israel","gaza","hamas","iran","north korea","kim jong",
+        "tariff","trade war","import","export","wto",
+        "fed","federal reserve","jerome powell","interest rate","rate hike","rate cut",
+        "inflation","cpi","pce","gdp","recession","unemployment","jobs report",
+        "debt ceiling","budget","deficit","spending bill","government shutdown",
+        "supreme court","scotus","justice","ruling","constitution",
+        "eu","european union","g7","g20","imf","world bank",
+        "prime minister","chancellor","parliament","brexit","macron","scholz",
+        "poll","approval rating","swing state","electoral college",
+        "executive order","veto","legislation","amendment","impeach",
+    ]):
         return "Politics & Macro"
-    elif any(x in q for x in ["nhl","nba","nfl","mlb","fifa","world cup","stanley cup",
-                                "super bowl","championship","soccer","football","basketball",
-                                "baseball","hockey","tennis","golf"]):
+
+    # ── Sports ────────────────────────────────────────────────────────────────
+    elif any(x in q for x in [
+        "nba","nfl","mlb","nhl","mls","wnba","ufc","pga","lpga",
+        "fifa","uefa","premier league","la liga","serie a","bundesliga","ligue 1",
+        "champions league","europa league","world cup","euro","copa america",
+        "ncaa","march madness","college football","cfp","bowl game",
+        "formula 1","f1","nascar","indycar","motogp",
+        "super bowl","stanley cup","world series","nba finals","nba championship",
+        "wimbledon","us open","french open","australian open","masters","ryder cup",
+        "olympics","medal","gold medal",
+        "soccer","football","basketball","baseball","hockey","tennis","golf",
+        "boxing","mma","wrestling","volleyball","rugby","cricket","cycling",
+        "score","points","touchdown","homerun","home run","field goal","three pointer",
+        "assist","rebound","strikeout","shutout","hat trick","overtime","playoff",
+        "championship","tournament","season","draft","trade","roster","injury report",
+        "mvp","all-star","hall of fame","win total","spread","over under","moneyline",
+        "quarterback","pitcher","goalie","forward","midfielder","defender","center",
+        "lebron","mahomes","messi","ronaldo","curry","jokic","luka","giannis",
+        "sga","gilgeous","lamar jackson","burrow","judge","ohtani","shohei",
+        "djokovic","federer","nadal","serena","tiger woods","mcilroy",
+        "game 1","game 2","game 3","game 4","game 5","game 6","game 7",
+        "first half","second half","first quarter","first period","regulation",
+        "prop bet","player prop","team total","moneyline","ats","spread",
+    ]):
         return "Sports"
-    elif any(x in q for x in ["bitcoin","btc","eth","crypto","ethereum","solana","coinbase","binance"]):
+
+    # ── Crypto ────────────────────────────────────────────────────────────────
+    elif any(x in q for x in [
+        "bitcoin","btc","ethereum","eth","solana","sol","cardano","ada",
+        "xrp","ripple","dogecoin","doge","shiba","avax","avalanche",
+        "polygon","matic","chainlink","link","uniswap","uni","aave",
+        "bnb","binance","coinbase","kraken","ftx","celsius","blockfi",
+        "crypto","cryptocurrency","blockchain","defi","nft","web3",
+        "stablecoin","usdt","usdc","tether","dao","token","altcoin",
+        "mining","proof of stake","proof of work","halving","satoshi",
+        "metaverse","opensea","ledger","metamask","wallet","exchange",
+        "sec crypto","crypto regulation","spot etf","bitcoin etf","crypto etf",
+        "pump","dump","bull run","bear market","all time high","ath",
+        "layer 2","rollup","zk proof","lightning network",
+    ]):
         return "Crypto"
-    elif any(x in q for x in ["openai","gpt","anthropic","google","apple","microsoft","nvidia","stock","ipo","earnings"]):
+
+    # ── Tech & Markets ────────────────────────────────────────────────────────
+    elif any(x in q for x in [
+        "openai","chatgpt","gpt","anthropic","claude","gemini","llama","mistral",
+        "google","alphabet","apple","microsoft","meta","amazon","netflix","tesla",
+        "nvidia","amd","intel","qualcomm","arm","tsmc","samsung","asml",
+        "uber","lyft","airbnb","doordash","instacart","stripe","plaid","klarna",
+        "spacex","starlink","blue origin","boeing","lockheed",
+        "stock","stocks","equity","share","ipo","spac","merger","acquisition",
+        "earnings","revenue","profit","eps","guidance","valuation","market cap",
+        "s&p","s&p 500","nasdaq","dow jones","russell","vix","spy","qqq",
+        "hedge fund","private equity","venture capital","vc","angel investor",
+        "bond","yield","treasury","10 year","2 year","yield curve","basis points",
+        "oil","crude","wti","brent","opec","natural gas","energy prices",
+        "gold","silver","commodities","futures","options","derivatives","forex",
+        "artificial intelligence","machine learning","large language model","llm",
+        "autonomous","self-driving","chip","semiconductor","data center","gpu",
+        "cybersecurity","hack","breach","ransomware","data leak",
+        "antitrust","ftc","doj","gdpr","sec","regulation tech",
+        "layoffs","hiring","ceo","cto","founder","startup","unicorn",
+    ]):
         return "Tech & Markets"
-    elif any(x in q for x in ["album","movie","gta","taylor swift","rihanna","oscar","grammy",
-                                "celebrity","convicted","sentenced","trial","weinstein"]):
+
+    # ── Entertainment & Legal ─────────────────────────────────────────────────
+    elif any(x in q for x in [
+        "album","song","single","tour","concert","grammy","billboard",
+        "taylor swift","beyonce","rihanna","drake","kanye","ye","travis scott",
+        "bad bunny","olivia rodrigo","billie eilish","ariana grande","the weeknd",
+        "spotify","apple music","number one","platinum","chart","debut",
+        "movie","film","box office","oscar","academy award","golden globe",
+        "emmy","bafta","cannes","sundance","netflix show","hbo","disney plus","marvel",
+        "dc comics","star wars","sequel","reboot","trailer","release date","premiere",
+        "gta","video game","gaming","playstation","xbox","nintendo","steam","esports",
+        "celebrity","kardashian","jenner","justin bieber","brad pitt","angelina",
+        "divorce","marriage","engaged","baby","pregnant","feud","beef","drama",
+        "trial","verdict","convicted","sentenced","acquitted","lawsuit","sued",
+        "indicted","charged","arrested","plea","bail","prison","parole","appeal",
+        "weinstein","epstein","defamation","case","jury","criminal","civil suit",
+        "reality tv","bachelor","survivor","big brother","american idol",
+    ]):
         return "Entertainment & Legal"
+
+    # ── Other ─────────────────────────────────────────────────────────────────
     else:
         return "Other"
 
@@ -267,18 +358,20 @@ Convert the user's plain-English strategy into structured rules.
 Return ONLY a valid JSON object with exactly these fields:
 {
   "condition": "less than" | "greater than" | "between",
-  "threshold_1": <float 0.05–0.95>,
-  "threshold_2": <float 0.05–0.95 or null>,
+  "threshold_1": <float 0.05-0.95>,
+  "threshold_2": <float 0.05-0.95 or null>,
   "category": "All" | "Politics & Macro" | "Sports" | "Crypto" | "Tech & Markets" | "Entertainment & Legal" | "Other",
   "source": "all" | "polymarket" | "kalshi",
-  "explanation": "<one sentence plain English summary of the rule>"
+  "explanation": "<one sentence plain English summary of the rule>",
+  "keywords": ["<3-6 short keywords or phrases extracted from the user intent to semantically filter market titles, e.g. points, score, over, NBA, player>"]
 }
+The keywords field is critical — extract the most specific terms from the user's intent that should appear in matching market titles.
 Return ONLY the JSON, no markdown, no extra text."""
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 500, "system": system,
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 600, "system": system,
                   "messages": [{"role": "user", "content": user_input}]},
             timeout=15
         )
@@ -576,6 +669,8 @@ with tab4:
             source      = result.get("source", "all")
             explanation = result.get("explanation", "")
 
+            keywords = result.get("keywords", [])
+
             bt_base = df_markets.copy()
             if source == "polymarket":  bt_base = bt_base[bt_base["source"] == "polymarket"]
             elif source == "kalshi":    bt_base = bt_base[bt_base["source"] == "kalshi"]
@@ -589,7 +684,23 @@ with tab4:
                 t2 = threshold_2 if threshold_2 else threshold_1
                 matched = bt_base[(bt_base["mid_price"] >= threshold_1) & (bt_base["mid_price"] <= t2)]
 
-            matched = matched.copy().sort_values("current_price", ascending=False).head(10).reset_index(drop=True)
+            # semantic keyword filter — rank by how many keywords appear in the market title
+            if keywords and not matched.empty:
+                kws = [k.lower() for k in keywords]
+                matched = matched.copy()
+                matched["kw_score"] = matched["event_ticker"].str.lower().apply(
+                    lambda title: sum(1 for k in kws if k in title)
+                )
+                # if any market matches at least 1 keyword, filter to those; otherwise keep all
+                kw_matched = matched[matched["kw_score"] > 0]
+                if not kw_matched.empty:
+                    matched = kw_matched.sort_values("kw_score", ascending=False)
+                else:
+                    matched = matched.sort_values("current_price", ascending=False)
+            else:
+                matched = matched.sort_values("current_price", ascending=False)
+
+            matched = matched.head(10).reset_index(drop=True)
 
             st.markdown("---")
             ai_left, ai_right = st.columns(2)
