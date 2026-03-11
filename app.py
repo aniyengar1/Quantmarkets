@@ -6,7 +6,7 @@ import requests
 import json
 from supabase import create_client
 
-st.set_page_config(page_title="QuantMarkets", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Callibr", page_icon="🎯", layout="wide")
 
 # ── custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -168,9 +168,9 @@ table a:hover { border-bottom-color: #FFFFFF; }
 # ── page header ───────────────────────────────────────────────────────────────
 st.markdown("""
 <div style="padding:40px 0 28px 0; border-bottom:1px solid #1A1A1A; margin-bottom:32px;">
-    <div style="font-size:10px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:#444444;margin-bottom:10px;">PREDICTION MARKETS</div>
-    <div style="font-size:38px;font-weight:700;color:#FFFFFF;letter-spacing:-0.03em;line-height:1;">QuantMarkets</div>
-    <div style="font-size:14px;color:#444444;margin-top:10px;font-weight:400;letter-spacing:0.01em;">Backtest strategies · Find edges · Place smarter bets</div>
+    <div style="font-size:10px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:#444444;margin-bottom:10px;">PREDICTION MARKET INTELLIGENCE</div>
+    <div style="font-size:38px;font-weight:700;color:#FFFFFF;letter-spacing:-0.03em;line-height:1;">Callibr</div>
+    <div style="font-size:14px;color:#444444;margin-top:10px;font-weight:400;letter-spacing:0.01em;">Find mispriced markets · Research any bet · Get your edge</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -178,6 +178,7 @@ st.markdown("""
 SUPABASE_URL      = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY      = st.secrets["SUPABASE_KEY"]
 ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
+NEWSAPI_KEY       = st.secrets.get("NEWSAPI_KEY", "")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -555,8 +556,8 @@ df_hist_markets   = build_markets_df(df_hist_raw)   if not df_hist_raw.empty   e
 df_markets        = build_markets_df(df_live_raw)
 
 # ── sidebar ───────────────────────────────────────────────────────────────────
-st.sidebar.markdown("## QuantMarkets")
-st.sidebar.markdown("<div style='font-size:11px;color:#444;margin-bottom:16px;'>Prediction market intelligence</div>", unsafe_allow_html=True)
+st.sidebar.markdown("## Callibr")
+st.sidebar.markdown("<div style='font-size:11px;color:#444;margin-bottom:16px;'>Find your edge</div>", unsafe_allow_html=True)
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Data Pipeline")
 st.sidebar.metric("Total snapshots", f"{len(df_raw):,}")
@@ -567,9 +568,8 @@ for src in ["polymarket","kalshi","kalshi_historical"]:
     st.sidebar.markdown(f"{SOURCE_LABELS[src]}: **{n:,}** markets")
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📊 Overview", "🔀 Sources", "📚 Resolved",
-    "🤖 AI Strategy", "🔬 Backtester", "💰 Recommender"
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Overview", "🔀 Sources", "📚 Resolved", "🔍 Market Research"
 ])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -778,365 +778,384 @@ with tab3:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 4 — AI STRATEGY BUILDER (retail)
+# ─────────────────────────────────────────────────────────────────────────────
+# EDGE SCORE + NEWS + RESEARCH CARD FUNCTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_edge_score(row, df_all):
+    """
+    Edge Score 0-100. Higher = more likely mispriced / worth researching.
+    Components:
+      - Price drift intensity (how much has it moved vs category average)
+      - Volatility (std of prices for this ticker across snapshots)
+      - Proximity to resolution (closer = more signal)
+      - Cross-source disagreement (if same event on both sources, gap matters)
+      - Contrarian signal (markets <15% or >85% are often overconfident)
+    """
+    score = 50.0  # baseline
+
+    # 1. Price drift vs category peers
+    cat = row.get("category", "Other")
+    cat_avg_change = df_all[df_all["category"] == cat]["price_change_pct"].mean()
+    own_change = row.get("price_change_pct", 0)
+    drift_delta = abs(own_change - cat_avg_change)
+    score += min(drift_delta * 0.8, 20)  # max +20
+
+    # 2. Volatility from raw snapshots (use price_change_pct as proxy)
+    pct = abs(row.get("price_change_pct", 0))
+    score += min(pct * 0.3, 15)  # max +15
+
+    # 3. Contrarian signal — extreme probabilities are often wrong
+    cp = row.get("current_price", 0.5)
+    if cp < 0.12 or cp > 0.88:
+        score += 10  # crowd overconfident
+    elif 0.4 <= cp <= 0.6:
+        score -= 5   # contested markets less interesting for edge
+
+    # 4. Proximity to close — closer deadline = more urgency
+    days = row.get("days_to_close", 30)
+    if days is not None and not pd.isna(days):
+        if days <= 3:   score += 10
+        elif days <= 7: score += 6
+        elif days <= 14: score += 3
+
+    # 5. Opening vs current divergence
+    mid = row.get("mid_price", cp)
+    divergence = abs(cp - mid)
+    score += min(divergence * 60, 15)  # max +15
+
+    return min(max(round(score), 0), 100)
+
+def edge_score_color(score):
+    if score >= 75: return "#00C2A8"   # teal — strong edge
+    elif score >= 55: return "#F59E0B" # amber — moderate
+    else: return "#555555"              # grey — weak
+
+def edge_score_label(score):
+    if score >= 75: return "STRONG EDGE"
+    elif score >= 55: return "MODERATE"
+    else: return "WEAK"
+
+def build_news_query(market_title, category):
+    """Build a tight, specific NewsAPI query from a market title."""
+    # Strip prediction market boilerplate
+    stop = ["will","the","a","an","in","of","to","by","for","at","on","is","are",
+            "does","do","who","what","when","how","which","be","been","has","have",
+            "yes","no","over","under","more","less","than","between","or","and",
+            "during","professional","basketball","game","match","season"]
+    words = [w.strip("?.,!") for w in market_title.split() if w.lower().strip("?.,!") not in stop and len(w) > 2]
+
+    # Take the most meaningful 4-5 words
+    query_words = words[:5]
+
+    # Category-specific boosters
+    boosters = {
+        "Politics & Macro": ["election","policy","congress","senate"],
+        "Sports": ["game","stats","injury","trade"],
+        "Crypto": ["price","market","regulation"],
+        "Tech & Markets": ["earnings","stock","announcement"],
+        "Entertainment & Legal": ["trial","verdict","release"],
+    }
+    # Don't add booster if already in query
+    boost = [b for b in boosters.get(category, []) if b not in " ".join(query_words).lower()]
+    if boost: query_words.append(boost[0])
+
+    return " ".join(query_words)
+
+@st.cache_data(ttl=1800)  # cache 30 min
+def fetch_news(query, max_articles=5):
+    """Fetch recent news articles via NewsAPI."""
+    if not NEWSAPI_KEY:
+        return []
+    try:
+        r = requests.get(
+            "https://newsapi.org/v2/everything",
+            params={
+                "q": query,
+                "sortBy": "publishedAt",
+                "language": "en",
+                "pageSize": max_articles,
+                "apiKey": NEWSAPI_KEY,
+            },
+            timeout=8,
+        )
+        data = r.json()
+        articles = data.get("articles", [])
+        return [
+            {
+                "title":       a.get("title", ""),
+                "source":      a.get("source", {}).get("name", ""),
+                "published":   a.get("publishedAt", "")[:10],
+                "url":         a.get("url", ""),
+                "description": a.get("description", "") or "",
+            }
+            for a in articles
+            if a.get("title") and "[Removed]" not in a.get("title", "")
+        ]
+    except Exception:
+        return []
+
+@st.cache_data(ttl=3600)
+def generate_market_research(market_title, current_price, category, edge_score, price_change_pct, news_headlines):
+    """Call Claude to generate a full market research card."""
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    news_block = ""
+    if news_headlines:
+        news_block = "\n".join([f"- [{a['source']} {a['published']}] {a['title']}" for a in news_headlines[:5]])
+    else:
+        news_block = "No recent news found."
+
+    system = """You are a sharp prediction market analyst. Your job is to assess whether a prediction market is fairly priced.
+Be concise, direct, and data-driven. No fluff. Think like a quant who also reads the news.
+Return ONLY a valid JSON object with exactly these fields:
+{
+  "fair_value": <float 0.01-0.99, your estimate of true probability>,
+  "verdict": "OVERPRICED" | "UNDERPRICED" | "FAIRLY PRICED",
+  "confidence": "HIGH" | "MEDIUM" | "LOW",
+  "reasoning": "<2-3 sharp sentences explaining your verdict. Reference the news if relevant. Be specific.>",
+  "key_risk": "<single biggest factor that could make you wrong>",
+  "base_rate": "<relevant historical base rate if you know one, e.g. incumbents win 70% of elections, or N/A>"
+}"""
+
+    prompt = f"""Market: {market_title}
+Current probability: {current_price:.1%}
+Category: {category}
+Edge score: {edge_score}/100
+Price change: {price_change_pct:+.1f}% since first observed
+
+Recent news:
+{news_block}
+
+Assess this market. Is it fairly priced?"""
+
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 500, "system": system,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=20,
+        )
+        r.raise_for_status()
+        text = r.json()["content"][0]["text"].strip().replace("```json","").replace("```","").strip()
+        return json.loads(text)
+    except Exception as e:
+        return None
+
+def render_research_card(row, research, news, edge_score, df_all):
+    """Render full market research card HTML."""
+    cp = row["current_price"]
+    verdict_colors = {"OVERPRICED": "#DC2626", "UNDERPRICED": "#00C2A8", "FAIRLY PRICED": "#F59E0B"}
+    ec = edge_score_color(edge_score)
+
+    # source link
+    if row["source"] == "polymarket":
+        bet_url = f"https://polymarket.com/event/{row['ticker']}"
+        src_label = "🟣 Polymarket"
+    else:
+        bet_url = f"https://kalshi.com/markets/{row['ticker']}"
+        src_label = "🔵 Kalshi"
+
+    # verdict block
+    if research:
+        fv = research.get("fair_value", cp)
+        verdict = research.get("verdict", "FAIRLY PRICED")
+        confidence = research.get("confidence", "LOW")
+        reasoning = research.get("reasoning", "")
+        key_risk = research.get("key_risk", "")
+        base_rate = research.get("base_rate", "N/A")
+        vc = verdict_colors.get(verdict, "#888888")
+        fv_diff = fv - cp
+        diff_str = f"+{fv_diff:.0%}" if fv_diff >= 0 else f"{fv_diff:.0%}"
+        diff_color = "#00C2A8" if fv_diff > 0.02 else "#DC2626" if fv_diff < -0.02 else "#F59E0B"
+
+        verdict_html = f"""
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;">
+  <div style="background:#111;border:1px solid #1E1E1E;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:10px;color:#555;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:6px;">Current Price</div>
+    <div style="font-size:28px;font-weight:700;color:#fff;">{cp:.0%}</div>
+  </div>
+  <div style="background:#111;border:1px solid #1E1E1E;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:10px;color:#555;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:6px;">Fair Value</div>
+    <div style="font-size:28px;font-weight:700;color:{diff_color};">{fv:.0%} <span style="font-size:14px;">({diff_str})</span></div>
+  </div>
+  <div style="background:#111;border:1px solid {vc};border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:10px;color:#555;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:6px;">Verdict</div>
+    <div style="font-size:18px;font-weight:700;color:{vc};">{verdict}</div>
+    <div style="font-size:10px;color:#555;margin-top:4px;">{confidence} confidence</div>
+  </div>
+</div>
+<div style="background:#0D0D0D;border:1px solid #1A1A1A;border-left:3px solid {vc};border-radius:6px;padding:16px;margin-bottom:12px;">
+  <div style="font-size:11px;color:#888;line-height:1.7;">{reasoning}</div>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+  <div style="background:#0D0D0D;border:1px solid #1A1A1A;border-radius:6px;padding:12px;">
+    <div style="font-size:10px;color:#555;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;">Key Risk</div>
+    <div style="font-size:12px;color:#CCC;">{key_risk}</div>
+  </div>
+  <div style="background:#0D0D0D;border:1px solid #1A1A1A;border-radius:6px;padding:12px;">
+    <div style="font-size:10px;color:#555;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;">Historical Base Rate</div>
+    <div style="font-size:12px;color:#CCC;">{base_rate}</div>
+  </div>
+</div>"""
+    else:
+        verdict_html = f"""
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+  <div style="background:#111;border:1px solid #1E1E1E;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:10px;color:#555;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:6px;">Current Price</div>
+    <div style="font-size:28px;font-weight:700;color:#fff;">{cp:.0%}</div>
+  </div>
+  <div style="background:#111;border:1px solid #1E1E1E;border-radius:8px;padding:16px;text-align:center;">
+    <div style="font-size:10px;color:#555;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:6px;">Edge Score</div>
+    <div style="font-size:28px;font-weight:700;color:{ec};">{edge_score}</div>
+  </div>
+</div>"""
+
+    # news block
+    if news:
+        news_items = ""
+        for a in news[:4]:
+            news_items += f"""<div style="padding:10px 0;border-bottom:1px solid #151515;">
+  <a href="{a['url']}" target="_blank" style="font-size:13px;color:#E0E0E0;text-decoration:none;font-weight:500;line-height:1.4;">{a['title']}</a>
+  <div style="font-size:10px;color:#444;margin-top:4px;">{a['source']} · {a['published']}</div>
+</div>"""
+        news_html = f"""<div style="margin-bottom:16px;">
+<div style="font-size:10px;color:#555;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:10px;">📰 Recent News</div>
+{news_items}
+</div>"""
+    else:
+        news_html = '<div style="font-size:12px;color:#444;margin-bottom:16px;">No recent news found for this market.</div>'
+
+    card = f"""
+<div style="background:#111111;border:1px solid #1E1E1E;border-radius:12px;padding:24px;margin-bottom:16px;">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;">
+    <div style="flex:1;margin-right:16px;">
+      <div style="font-size:10px;color:#444;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px;">{src_label} · {row['category']}</div>
+      <div style="font-size:16px;font-weight:600;color:#FFF;line-height:1.4;">{row['event_ticker']}</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;">
+      <div style="text-align:center;">
+        <div style="font-size:9px;color:#444;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:3px;">EDGE</div>
+        <div style="font-size:20px;font-weight:700;color:{ec};">{edge_score}</div>
+        <div style="font-size:9px;color:{ec};letter-spacing:0.06em;">{edge_score_label(edge_score)}</div>
+      </div>
+      <a href="{bet_url}" target="_blank" style="background:#FFF;color:#000;font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;padding:10px 20px;border-radius:5px;text-decoration:none;">Bet →</a>
+    </div>
+  </div>
+  {verdict_html}
+  {news_html}
+</div>"""
+    return card
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 4 — MARKET RESEARCH TERMINAL
 # ─────────────────────────────────────────────────────────────────────────────
 with tab4:
-    st.markdown("## 🤖 AI Strategy Builder")
+    st.markdown("## 🔍 Market Research Terminal")
     st.markdown(
-        "<div style='color:#555;font-size:14px;margin-bottom:24px;'>"
-        "Describe your strategy in plain English. AI finds matching bets right now."
-        "</div>",
+        "<div style='color:#555;font-size:14px;margin-bottom:28px;'>Search any topic. We surface live markets, score each edge opportunity, pull recent news, and give you a verdict.</div>",
         unsafe_allow_html=True,
     )
 
-    if not ANTHROPIC_API_KEY:
-        st.error("Add ANTHROPIC_API_KEY to your Streamlit secrets to enable this feature.")
-    else:
-        examples = [
-            "Buy underdog politics markets under 20%",
-            "Buy contested crypto markets between 40% and 60%",
-            "Buy high probability Polymarket sports above 70%",
-            "Find mispriced Kalshi markets under 30%",
-        ]
-        ex = st.selectbox("Start from an example:", ["(type your own below)"] + examples)
-        default_val = ex if ex != "(type your own below)" else ""
-        user_strategy = st.text_area(
-            "Describe your strategy",
-            value=default_val,
-            placeholder="e.g. I want to bet on underdog politics markets with low probability but high upside",
-            height=90,
+    # ── search + filters ──────────────────────────────────────────────────────
+    sr1, sr2, sr3 = st.columns([3, 1, 1])
+    with sr1:
+        search_query = st.text_input("", placeholder="Search markets — e.g. 'LeBron', 'Trump', 'Bitcoin ETF', 'Lakers'...", key="research_query", label_visibility="collapsed")
+    with sr2:
+        research_cat = st.selectbox("Category", ["All"] + sorted(df_markets["category"].unique().tolist()), key="res_cat", label_visibility="collapsed")
+    with sr3:
+        research_src = st.selectbox("Source", ["All", "Polymarket", "Kalshi"], key="res_src", label_visibility="collapsed")
+
+    # ── filter markets ────────────────────────────────────────────────────────
+    df_res = df_markets.copy()
+    if research_cat != "All":
+        df_res = df_res[df_res["category"] == research_cat]
+    if research_src == "Polymarket":
+        df_res = df_res[df_res["source"] == "polymarket"]
+    elif research_src == "Kalshi":
+        df_res = df_res[df_res["source"] == "kalshi"]
+
+    if search_query.strip():
+        terms = search_query.lower().split()
+        mask = df_res["event_ticker"].str.lower().apply(lambda t: any(term in t for term in terms))
+        df_res = df_res[mask]
+
+    # ── compute edge scores ───────────────────────────────────────────────────
+    if not df_res.empty:
+        df_res = df_res.copy()
+        df_res["edge_score"] = df_res.apply(lambda r: compute_edge_score(r, df_markets), axis=1)
+        df_res = df_res.sort_values("edge_score", ascending=False).reset_index(drop=True)
+
+    # ── summary bar ───────────────────────────────────────────────────────────
+    if not df_res.empty:
+        sb1, sb2, sb3, sb4 = st.columns(4)
+        sb1.metric("Markets found", len(df_res))
+        sb2.metric("Avg Edge Score", f"{df_res['edge_score'].mean():.0f}/100")
+        sb3.metric("Strong edges (75+)", len(df_res[df_res["edge_score"] >= 75]))
+        sb4.metric("Avg probability", f"{df_res['current_price'].mean():.0%}")
+
+        st.markdown("---")
+
+        # ── market list with mini edge scores ─────────────────────────────────
+        st.markdown("### Markets ranked by Edge Score")
+        st.markdown("<div style='color:#444;font-size:12px;margin-bottom:16px;'>Click <b>Research</b> on any market to get the full analysis, news, and verdict.</div>", unsafe_allow_html=True)
+
+        # Show top 20 in a scannable table
+        display_df = df_res.head(20).copy()
+        display_df["Edge"] = display_df["edge_score"].apply(
+            lambda s: f'<span style="color:{edge_score_color(s)};font-weight:700;">{s}</span> <span style="font-size:10px;color:{edge_score_color(s)};">{edge_score_label(s)}</span>'
         )
+        display_df["Probability"] = display_df["current_price"].apply(lambda x: f"{x:.0%}")
+        display_df["Change"] = display_df["price_change_pct"].apply(
+            lambda x: f'<span style="color:#00C2A8;">+{x:.1f}%</span>' if x > 0 else f'<span style="color:#DC2626;">{x:.1f}%</span>'
+        )
+        display_df["Source"] = display_df["source"].map(SOURCE_LABELS).fillna(display_df["source"])
 
-        if st.button("🧠 Find My Bets"):
-            if not user_strategy.strip():
-                st.warning("Please enter a strategy.")
-            else:
-                with st.spinner("Analysing markets..."):
-                    result = parse_strategy_with_claude(user_strategy)
-                if "error" in result:
-                    st.error(f"Parsing failed: {result['error']}")
-                else:
-                    st.session_state["ai_strategy"] = result
+        tbl = display_df[["event_ticker", "category", "Source", "Probability", "Change", "Edge"]].copy()
+        tbl.columns = ["Market", "Category", "Source", "Probability", "Change", "Edge Score"]
+        st.write(tbl.to_html(escape=False, index=False), unsafe_allow_html=True)
 
-        if "ai_strategy" in st.session_state:
-            result      = st.session_state["ai_strategy"]
-            condition   = result.get("condition", "less than")
-            threshold_1 = result.get("threshold_1", 0.3)
-            threshold_2 = result.get("threshold_2")
-            category    = result.get("category", "All")
-            source      = result.get("source", "all")
-            explanation = result.get("explanation", "")
+        st.markdown("---")
+        st.markdown("### Deep Research")
+        st.markdown("<div style='color:#444;font-size:12px;margin-bottom:16px;'>Select a market for full AI analysis with news and mispricing verdict.</div>", unsafe_allow_html=True)
 
-            keywords = result.get("keywords", [])
+        # Market selector
+        market_options = df_res["event_ticker"].tolist()[:30]
+        selected_market = st.selectbox("Select market to research", market_options, key="res_market_select")
 
-            bt_base = df_markets.copy()
-            if source == "polymarket":  bt_base = bt_base[bt_base["source"] == "polymarket"]
-            elif source == "kalshi":    bt_base = bt_base[bt_base["source"] == "kalshi"]
-            if category != "All":       bt_base = bt_base[bt_base["category"] == category]
+        if st.button("🔬 Run Deep Research", key="run_research"):
+            row = df_res[df_res["event_ticker"] == selected_market].iloc[0]
+            edge = int(row["edge_score"])
 
-            if condition == "less than":
-                matched = bt_base[bt_base["mid_price"] < threshold_1]
-            elif condition == "greater than":
-                matched = bt_base[bt_base["mid_price"] > threshold_1]
-            else:
-                t2 = threshold_2 if threshold_2 else threshold_1
-                matched = bt_base[(bt_base["mid_price"] >= threshold_1) & (bt_base["mid_price"] <= t2)]
+            with st.spinner("Fetching news and generating analysis..."):
+                # Build smart news query
+                news_query = build_news_query(row["event_ticker"], row["category"])
+                news = fetch_news(news_query, max_articles=5)
 
-            # semantic keyword filter — rank by how many keywords appear in the market title
-            if keywords and not matched.empty:
-                kws = [k.lower() for k in keywords]
-                matched = matched.copy()
-                matched["kw_score"] = matched["event_ticker"].str.lower().apply(
-                    lambda title: sum(1 for k in kws if k in title)
+                # Generate AI research
+                research = generate_market_research(
+                    market_title    = row["event_ticker"],
+                    current_price   = row["current_price"],
+                    category        = row["category"],
+                    edge_score      = edge,
+                    price_change_pct= row["price_change_pct"],
+                    news_headlines  = news,
                 )
-                # if any market matches at least 1 keyword, filter to those; otherwise keep all
-                kw_matched = matched[matched["kw_score"] > 0]
-                if not kw_matched.empty:
-                    matched = kw_matched.sort_values("kw_score", ascending=False)
-                else:
-                    matched = matched.sort_values("current_price", ascending=False)
-            else:
-                matched = matched.sort_values("current_price", ascending=False)
 
-            matched = matched.head(10).reset_index(drop=True)
+                # Fetch sports stats if applicable
+                sports_stats = detect_entity_and_fetch_stats(row["event_ticker"], row["category"])
 
-            st.markdown("---")
-            ai_left, ai_right = st.columns(2)
+            # Render research card
+            st.markdown(render_research_card(row, research, news, edge, df_markets), unsafe_allow_html=True)
 
-            with ai_left:
-                st.markdown("### 💬 AI Analysis")
-                if condition == "between" and threshold_2:
-                    prob_rule = f"between {threshold_1:.0%} and {threshold_2:.0%}"
-                elif condition == "less than":
-                    prob_rule = f"below {threshold_1:.0%}"
-                else:
-                    prob_rule = f"above {threshold_1:.0%}"
+            # Sports stats below card
+            if sports_stats:
+                st.markdown(render_stats_card(sports_stats), unsafe_allow_html=True)
 
-                src_label = source.title() if source != "all" else "All"
-                analysis_html = (
-                    "<div style='background:#111;border:1px solid #222;border-radius:10px;"
-                    "padding:20px 24px;line-height:1.8;color:#CCCCCC;font-size:14px;'>"
-                    + explanation
-                    + "<br><br>"
-                    "<span style='color:#555;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;'>RULES APPLIED</span><br>"
-                    f"Probability: <b style='color:#fff'>{prob_rule}</b><br>"
-                    f"Category: <b style='color:#fff'>{category}</b><br>"
-                    f"Source: <b style='color:#fff'>{src_label}</b><br>"
-                    f"Markets matched: <b style='color:#fff'>{len(matched)}</b>"
-                    "</div>"
-                )
-                st.markdown(analysis_html, unsafe_allow_html=True)
-
-                if not matched.empty:
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    ma1, ma2 = st.columns(2)
-                    safe_cp = matched["current_price"].replace(0, float("nan"))
-                    ma1.metric("Avg Probability", f"{matched['current_price'].mean():.0%}")
-                    ma2.metric("Avg Payout / $1", f"{(1 / safe_cp).mean():.2f}x")
-
-                    # stats cards in left column under avg metrics
-                    if category == "Sports":
-                        st.markdown("<div style='margin-top:20px;font-size:11px;color:#555;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:8px;'>RECENT STATS</div>", unsafe_allow_html=True)
-                        shown = set()
-                        for _, row in matched.iterrows():
-                            with st.spinner(f"Fetching stats..."):
-                                stats = detect_entity_and_fetch_stats(row["event_ticker"], category)
-                            if stats:
-                                key = stats.get("player") or stats.get("team","")
-                                if key not in shown:
-                                    shown.add(key)
-                                    st.markdown(render_stats_card(stats), unsafe_allow_html=True)
-
-            with ai_right:
-                st.markdown("### 🎯 Recommended Bets")
-                if matched.empty:
-                    st.info("No markets matched. Try adjusting your strategy.")
-                else:
-                    safe_cp2 = matched["current_price"].replace(0, float("nan"))
-                    matched["payout"]       = (1 / safe_cp2).round(2)
-                    matched["resolves_yes"] = matched["current_price"].apply(lambda x: f"{x*100:.0f}%")
-                    matched["change"]       = matched["price_change_pct"].apply(
-                        lambda x: f"+{x:.1f}%" if x >= 0 else f"{x:.1f}%"
-                    )
-
-                    def make_ai_link(row):
-                        if row["source"] == "polymarket":
-                            return f'<a href="https://polymarket.com/event/{row["ticker"]}" target="_blank">Bet →</a>'
-                        elif row["source"] == "kalshi":
-                            return f'<a href="https://kalshi.com/markets/{row["ticker"]}" target="_blank">Bet →</a>'
-                        return ""
-
-                    matched["link"] = matched.apply(make_ai_link, axis=1)
-                    disp = matched[["event_ticker", "resolves_yes", "payout", "change", "link"]].copy()
-                    disp.columns = ["Market", "Resolves YES", "Payout/$1", "Recent Change", "🔗"]
-                    st.write(disp.to_html(escape=False, index=False), unsafe_allow_html=True)
-
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("↩ Try a different strategy"):
-                del st.session_state["ai_strategy"]
-                st.rerun()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 5 — INSTITUTIONAL BACKTESTER
-# ─────────────────────────────────────────────────────────────────────────────
-with tab5:
-    st.markdown("## 🔬 Institutional Backtester")
-    st.markdown(
-        "<div style='color:#555;font-size:14px;margin-bottom:24px;'>"
-        "Paste your Python algorithm below. We run it against resolved Kalshi markets and return full performance metrics."
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-    howto_html = (
-        "<div style='background:#111;border:1px solid #1E1E1E;border-left:3px solid #3B82F6;"
-        "border-radius:8px;padding:16px 20px;font-size:13px;color:#888;margin-bottom:24px;'>"
-        "<b style='color:#fff'>How it works:</b> Define a function called "
-        "<code>run_strategy(markets)</code> that receives a DataFrame of resolved markets "
-        "and returns a list of trade dicts with keys: "
-        "<code>ticker</code>, <code>entry_price</code>, <code>exit_price</code>, <code>size</code>."
-        "</div>"
-    )
-    st.markdown(howto_html, unsafe_allow_html=True)
-
-    default_code = """\
-def run_strategy(markets):
-    \"\"\"
-    markets: DataFrame with columns:
-      ticker, event_ticker, category,
-      mid_price (entry), current_price (settlement), close_time
-
-    Return a list of trade dicts:
-      [{"ticker": ..., "entry_price": ..., "exit_price": ..., "size": 10}, ...]
-    \"\"\"
-    trades = []
-    for _, row in markets.iterrows():
-        # Example: buy any market priced below 30%
-        if row["mid_price"] < 0.30:
-            trades.append({
-                "ticker":      row["ticker"],
-                "market":      row["event_ticker"],
-                "category":    row["category"],
-                "entry_price": row["mid_price"],
-                "exit_price":  row["current_price"],
-                "size":        10,
-            })
-    return trades
-"""
-
-    user_code = st.text_area("Your strategy function", value=default_code, height=340)
-
-    hist_cats = sorted(df_hist_markets["category"].unique().tolist()) if not df_hist_markets.empty else []
-    bt_cat_inst = st.selectbox("Filter by category", ["All"] + hist_cats, key="inst_cat")
-
-    if st.button("▶ Run Backtest", key="inst_run"):
-        if df_hist_markets.empty:
-            st.warning("No resolved Kalshi markets available yet. Check back after more data is collected.")
+    else:
+        if search_query.strip():
+            st.info(f"No markets found for '{search_query}'. Try a broader term.")
         else:
-            try:
-                hist = df_hist_markets.copy()
-                if bt_cat_inst != "All":
-                    hist = hist[hist["category"] == bt_cat_inst]
-
-                if hist.empty:
-                    st.warning("No resolved markets in that category.")
-                else:
-                    local_ns = {}
-                    exec(user_code, {"pd": pd}, local_ns)
-
-                    if "run_strategy" not in local_ns:
-                        st.error("Your code must define a function called run_strategy(markets).")
-                    else:
-                        with st.spinner("Running backtest on resolved markets..."):
-                            trades = local_ns["run_strategy"](hist)
-
-                        if not trades:
-                            st.warning("Your strategy returned no trades. Try relaxing the conditions.")
-                        else:
-                            trades_df = pd.DataFrame(trades)
-                            required  = {"ticker", "entry_price", "exit_price", "size"}
-                            if not required.issubset(trades_df.columns):
-                                st.error(f"Each trade needs keys: {required}. Got: {set(trades_df.columns)}")
-                            else:
-                                trades_df["pnl"] = (
-                                    (trades_df["exit_price"] - trades_df["entry_price"])
-                                    / trades_df["entry_price"]
-                                ) * trades_df["size"]
-                                trades_df["pnl"]            = trades_df["pnl"].round(4)
-                                trades_df["win"]            = trades_df["pnl"] > 0
-                                trades_df["cumulative_pnl"] = trades_df["pnl"].cumsum()
-
-                                total_pnl  = trades_df["pnl"].sum()
-                                win_rate   = trades_df["win"].mean()
-                                n_trades   = len(trades_df)
-                                total_size = trades_df["size"].sum()
-                                returns    = trades_df["pnl"] / trades_df["size"]
-                                sharpe     = (
-                                    (returns.mean() / returns.std() * (252 ** 0.5))
-                                    if returns.std() > 0 else 0.0
-                                )
-
-                                st.markdown("---")
-                                st.markdown(f"### Results — {n_trades:,} trades executed")
-                                bm1, bm2, bm3, bm4 = st.columns(4)
-                                bm1.metric("Total P&L",    f"${total_pnl:+.2f}")
-                                bm2.metric("Win Rate",     f"{win_rate:.0%}")
-                                bm3.metric("Sharpe Ratio", f"{sharpe:.2f}")
-                                bm4.metric("Capital Used", f"${total_size:,.0f}")
-
-                                fig_pnl = go.Figure()
-                                fig_pnl.add_trace(go.Scatter(
-                                    x=trades_df.index,
-                                    y=trades_df["cumulative_pnl"],
-                                    mode="lines",
-                                    line=dict(color="#3B82F6", width=2),
-                                    fill="tozeroy",
-                                    fillcolor="rgba(59,130,246,0.08)",
-                                    hovertemplate="Trade %{x}<br>Cumulative P&L: $%{y:.2f}<extra></extra>",
-                                ))
-                                fig_pnl.add_hline(y=0, line_color="#333333", line_width=1)
-                                apply_layout(fig_pnl, "Cumulative P&L ($)", height=340)
-                                st.plotly_chart(fig_pnl, use_container_width=True)
-
-                                st.markdown("### Trade Breakdown")
-                                if "market" in trades_df.columns:
-                                    show_cols = ["market", "category", "entry_price", "exit_price", "size", "pnl", "win"]
-                                else:
-                                    show_cols = ["ticker", "entry_price", "exit_price", "size", "pnl", "win"]
-                                breakdown = trades_df[show_cols].copy()
-                                breakdown["entry_price"] = breakdown["entry_price"].apply(lambda x: f"{x:.2%}")
-                                breakdown["exit_price"]  = breakdown["exit_price"].apply(lambda x: f"{x:.2%}")
-                                breakdown["pnl"]         = breakdown["pnl"].apply(
-                                    lambda x: f"+${x:.2f}" if x >= 0 else f"-${abs(x):.2f}"
-                                )
-                                breakdown["win"]  = breakdown["win"].apply(lambda x: "✅" if x else "❌")
-                                breakdown.columns = [c.replace("_", " ").title() for c in breakdown.columns]
-                                st.dataframe(breakdown.reset_index(drop=True), use_container_width=True)
-
-            except Exception as e:
-                st.error(f"Error running your strategy: {e}")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 6 — RECOMMENDER
-# ─────────────────────────────────────────────────────────────────────────────
-with tab6:
-    st.markdown("## Smart Bet Recommender")
-    st.markdown("<div style='color:#555;font-size:14px;margin-bottom:24px;'>Set your budget and risk tolerance — we'll find the best markets right now.</div>", unsafe_allow_html=True)
-
-    rc1,rc2,rc3 = st.columns(3)
-    with rc1: budget = st.number_input("Budget ($)", min_value=10, max_value=100000, value=100, step=10)
-    with rc2: target_return = st.number_input("Target profit ($)", min_value=5, max_value=100000, value=50, step=5)
-    with rc3: risk_level = st.selectbox("Risk tolerance", ["Low","Medium","High"])
-
-    rec_src = st.selectbox("Source", ["All (Polymarket + Kalshi)","Polymarket only","Kalshi only"], key="rec_src")
-    rec_cat = st.selectbox("Category", ["All"]+sorted(df_markets["category"].unique().tolist()), key="rec_cat")
-
-    if st.button("🎯 Find Best Bets"):
-        if risk_level == "Low":
-            rec_df = df_markets[(df_markets["current_price"]>=0.65)&(df_markets["current_price"]<=0.95)]
-            risk_label = "Low risk — high probability"
-        elif risk_level == "Medium":
-            rec_df = df_markets[(df_markets["current_price"]>=0.35)&(df_markets["current_price"]<=0.65)]
-            risk_label = "Medium risk — contested"
-        else:
-            rec_df = df_markets[(df_markets["current_price"]>=0.05)&(df_markets["current_price"]<=0.35)]
-            risk_label = "High risk — contrarian"
-
-        if "Polymarket only" in rec_src: rec_df = rec_df[rec_df["source"]=="polymarket"]
-        elif "Kalshi only"   in rec_src: rec_df = rec_df[rec_df["source"]=="kalshi"]
-        if rec_cat != "All": rec_df = rec_df[rec_df["category"]==rec_cat]
-
-        if rec_df.empty:
-            st.warning("No markets match. Try adjusting filters.")
-        else:
-            rec_df = rec_df.copy()
-            rec_df["payout_if_yes"] = (1/rec_df["current_price"]).round(2)
-            rec_df = rec_df.sort_values("current_price", ascending=False).reset_index(drop=True)
-            max_bets = min(10, len(rec_df))
-            rec_df   = rec_df.head(max_bets)
-            rec_df["bet_amount"]       = round(budget/max_bets, 2)
-            rec_df["potential_profit"] = ((rec_df["payout_if_yes"]-1)*rec_df["bet_amount"]).round(2)
-
-            def make_link(row):
-                if row["source"]=="polymarket": return f'<a href="https://polymarket.com/event/{row["ticker"]}" target="_blank">Place Bet →</a>'
-                elif row["source"]=="kalshi":   return f'<a href="https://kalshi.com/markets/{row["ticker"]}" target="_blank">Place Bet →</a>'
-                return ""
-            rec_df["link"] = rec_df.apply(make_link, axis=1)
-
-            st.markdown(f"### Top Bets — {risk_label}")
-            s1,s2,s3 = st.columns(3)
-            s1.metric("Markets found",     len(rec_df))
-            s2.metric("Avg probability",   f"{rec_df['current_price'].mean():.2%}")
-            s3.metric("Avg payout per $1", f"{rec_df['payout_if_yes'].mean():.2f}x")
-
-            bd = rec_df[["event_ticker","source","category","current_price","payout_if_yes","bet_amount","potential_profit","close_time","link"]].copy()
-            bd["source"] = bd["source"].map(SOURCE_LABELS).fillna(bd["source"])
-            bd.columns   = ["Market","Source","Category","Probability","Payout/$ 1","Bet ($)","Profit ($)","Closes","🔗"]
-            st.write(bd.to_html(escape=False, index=False), unsafe_allow_html=True)
-
-            total_bet, total_profit = rec_df["bet_amount"].sum(), rec_df["potential_profit"].sum()
-            st.markdown("---")
-            p1,p2,p3 = st.columns(3)
-            p1.metric("Capital deployed",   f"${total_bet:.2f}")
-            p2.metric("% of budget used",   f"{(total_bet/budget*100):.1f}%")
-            p3.metric("Total potential profit", f"${total_profit:.2f}")
+            st.info("Enter a search term above to find markets, or browse by category.")
