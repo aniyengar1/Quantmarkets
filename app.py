@@ -993,68 +993,95 @@ def fetch_news(query, max_articles=5):
 
 @st.cache_data(ttl=3600)
 def generate_market_research(market_title, current_price, category, edge_score, price_change_pct, news_headlines):
-    """Call Claude to generate a full market research card."""
+    """Call Claude Sonnet to generate a sharp market research card."""
     if not ANTHROPIC_API_KEY:
         return None
 
     news_block = ""
     if news_headlines:
-        news_block = "\n".join([f"- [{a['source']} {a['published']}] {a['title']}" for a in news_headlines[:5]])
+        news_block = "\n".join([
+            f"- [{a['source']} {a['published']}] {a['title']}" +
+            (f"\n  {a['description'][:120]}" if a.get('description') else "")
+            for a in news_headlines[:5]
+        ])
     else:
         news_block = "No recent news found."
 
-    system = """You are an elite prediction market analyst — think Nate Silver meets a sharp sports bettor.
-Your job: assess whether a market is mispriced given ALL available evidence.
+    system = """You are an elite prediction market analyst. Assess whether a market is mispriced.
 
-Rules:
-- Be brutally specific. If a team lost 3-0 in the first leg, say that. If a player is injured, say that. If a candidate is up 12 points in polls, say that.
-- Reference the news headlines directly — quote the key fact, not vague summaries.
-- Never say "market may be mispriced" — give a verdict and own it.
-- Price drift is a signal: if a market dropped 40%, something happened. Identify what from the news.
-- Use base rates aggressively: "Teams down 3-0 after first leg advance ~2% of the time historically."
-- Fair value should reflect your actual probability estimate, not just echo the current price.
-- For confidence_band: bear_case is your low estimate (pessimistic scenario), bull_case is your high estimate (optimistic scenario). These should be meaningfully different from fair_value — typically ±10-25% depending on uncertainty.
-- For narrative_flag: set to true if the price moved significantly (>15%) but the news headlines do NOT clearly explain why. This signals a hidden information edge.
+RULES — follow these exactly:
+1. Be brutally specific. If news mentions a 3-0 scoreline, a key injury, a poll number — cite it by name.
+2. If price moved >15%, something specific caused it. Find it in the headlines and name it.
+3. Use hard base rates: "Teams trailing 3-0 after first leg advance ~2% historically in Champions League."
+4. fair_value must be YOUR genuine estimate — not just the current price echoed back.
+5. bear_case and bull_case are the realistic low/high range — typically ±8-20pp from fair_value.
+6. narrative_flag = true ONLY if price moved >15% AND the headlines don't explain why.
+7. reasoning must be 2-3 sentences, specific, no vague phrases like "market uncertainty" or "various factors".
 
-Return ONLY a valid JSON object with exactly these fields:
+Return ONLY valid JSON, no markdown, no explanation:
 {
-  "fair_value": <float 0.01-0.99, your genuine probability estimate>,
-  "bear_case": <float 0.01-0.99, low end of fair value range>,
-  "bull_case": <float 0.01-0.99, high end of fair value range>,
+  "fair_value": <0.01-0.99>,
+  "bear_case": <0.01-0.99>,
+  "bull_case": <0.01-0.99>,
   "verdict": "OVERPRICED" | "UNDERPRICED" | "FAIRLY PRICED",
   "confidence": "HIGH" | "MEDIUM" | "LOW",
-  "reasoning": "<2-3 razor-sharp sentences. Name the specific event, score, or data point. No vagueness.>",
-  "key_risk": "<single most specific factor that could flip this>",
-  "base_rate": "<hard historical stat if known, otherwise N/A>",
-  "narrative_flag": <true if price moved big but news does not explain it, false otherwise>,
-  "narrative_flag_reason": "<if narrative_flag is true, one sentence explaining the gap — e.g. 'Price dropped 35% but no news found explaining the move — possible insider information or off-platform event'>"
+  "reasoning": "<2-3 sharp sentences citing specific facts from the news>",
+  "key_risk": "<single most specific factor that could flip this verdict>",
+  "base_rate": "<one hard historical stat, or N/A>",
+  "narrative_flag": true | false,
+  "narrative_flag_reason": "<one sentence if flag is true, else empty string>"
 }"""
 
     prompt = f"""Market: {market_title}
 Current probability: {current_price:.1%}
 Category: {category}
 Edge score: {edge_score}/100
-Price change: {price_change_pct:+.1f}% since first observed
+Price change: {price_change_pct:+.1f}% since tracking began
 
-IMPORTANT: A price change of {price_change_pct:+.1f}% is a strong signal. If it is a large move, something specific happened — identify it from the news and name it explicitly in your reasoning.
-
-Recent news headlines (most recent first):
+Recent news (most recent first):
 {news_block}
 
-Task: Give a sharp, specific verdict. Reference the actual news events by name. If a game result, score, or specific development is visible in the headlines, cite it directly."""
+Assess this market now."""
 
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 500, "system": system,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=20,
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 1024,
+                "system": system,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=30,
         )
         r.raise_for_status()
-        text = r.json()["content"][0]["text"].strip().replace("```json","").replace("```","").strip()
-        return json.loads(text)
-    except Exception as e:
+        text = r.json()["content"][0]["text"].strip()
+        # Strip any accidental markdown fences
+        text = text.replace("```json", "").replace("```", "").strip()
+        # Find the JSON object even if there's stray text
+        start = text.find("{")
+        end   = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            text = text[start:end]
+        result = json.loads(text)
+        # Ensure required fields with safe defaults
+        result.setdefault("fair_value", current_price)
+        result.setdefault("bear_case", max(0.01, result["fair_value"] - 0.10))
+        result.setdefault("bull_case", min(0.99, result["fair_value"] + 0.10))
+        result.setdefault("verdict", "FAIRLY PRICED")
+        result.setdefault("confidence", "LOW")
+        result.setdefault("reasoning", "")
+        result.setdefault("key_risk", "")
+        result.setdefault("base_rate", "N/A")
+        result.setdefault("narrative_flag", False)
+        result.setdefault("narrative_flag_reason", "")
+        return result
+    except Exception:
         return None
 
 def render_research_card(row, research, news, edge_score, df_all):
