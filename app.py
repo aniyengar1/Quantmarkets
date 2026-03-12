@@ -1343,37 +1343,148 @@ with tab4:
 
         st.markdown("---")
 
-        # ── market list with mini edge scores ─────────────────────────────────
-        st.markdown("### Markets ranked by Edge Score")
-        st.markdown("<div style='color:#444;font-size:12px;margin-bottom:16px;'>Click <b>Research</b> on any market to get the full analysis, news, and verdict.</div>", unsafe_allow_html=True)
+        # ── group markets by event (shared event_ticker prefix) ───────────────
+        # Extract event group: strip the last "option" token if title contains "?"
+        # e.g. "Boston at Oklahoma City Winner?" → group key "Boston at Oklahoma City"
+        # For non-search (browse mode), fall back to flat table
+        def extract_event_group(title):
+            """Strip the outcome token to get the parent event name."""
+            import re
+            t = title.strip()
+            # Remove trailing "?" and common outcome suffixes
+            t = re.sub(r'\?\s*$', '', t).strip()
+            # If title has a parenthetical context like (BOS vs OKC · 12 Mar), keep it but don't group on it
+            t = re.sub(r'\s*\(.*?\)\s*$', '', t).strip()
+            # Remove outcome tokens at the end: "Winner", "to win", "by X-Y", "set score", "spread"
+            t = re.sub(r'\b(winner|to win|wins|spread|moneyline|total|over|under|by \d[\d-]*)\s*$', '', t, flags=re.IGNORECASE).strip()
+            return t if t else title
 
-        # Show top 20 in a scannable table
-        display_df = df_res.head(20).copy()
-        display_df["Edge"] = display_df["edge_score"].apply(
-            lambda s: f'<span style="color:{edge_score_color(s)};font-weight:700;">{s}</span> <span style="font-size:10px;color:{edge_score_color(s)};">{edge_score_label(s)}</span>'
-        )
-        display_df["Probability"] = display_df["current_price"].apply(lambda x: f"{x:.0%}")
-        display_df["Change"] = display_df["price_change_pct"].apply(
-            lambda x: f'<span style="color:#00C2A8;">+{x:.1f}%</span>' if x > 0 else f'<span style="color:#DC2626;">{x:.1f}%</span>'
-        )
-        display_df["Source"] = display_df["source"].map(SOURCE_LABELS).fillna(display_df["source"])
-
+        display_df = df_res.head(60).copy()
         _closes_dt = pd.to_datetime(display_df["close_time"], errors="coerce", utc=True)
         display_df["Closes"] = _closes_dt.dt.strftime("%d %b").str.lstrip("0").replace("", "—")
-        display_df["event_ticker"] = display_df.apply(
-            lambda r: enrich_title_with_context(r["event_ticker"], r["ticker"], r.get("close_time","")), axis=1
+        display_df["enriched_title"] = display_df.apply(
+            lambda r: enrich_title_with_context(r["event_ticker"], r["ticker"], r.get("close_time", "")), axis=1
         )
-        tbl = display_df[["event_ticker", "category", "Source", "Probability", "Closes", "Change", "Edge"]].copy()
-        tbl.columns = ["Market", "Category", "Source", "Probability", "Closes", "Change", "Edge Score"]
-        st.write(tbl.to_html(escape=False, index=False), unsafe_allow_html=True)
+        display_df["event_group"] = display_df["enriched_title"].apply(extract_event_group)
+
+        # When a search is active, show grouped view; otherwise flat table
+        if search_query.strip():
+            st.markdown("### Markets by Event")
+            groups = display_df.groupby("event_group", sort=False)
+            # Sort groups by best edge score within each group
+            group_best = display_df.groupby("event_group")["edge_score"].max().sort_values(ascending=False)
+
+            for event_name in group_best.index:
+                grp = display_df[display_df["event_group"] == event_name].sort_values("edge_score", ascending=False)
+                best_edge = int(grp["edge_score"].max())
+                ec = edge_score_color(best_edge)
+                closes = grp["Closes"].iloc[0]
+                src_icons = " ".join(grp["source"].map({"polymarket": "🟣", "kalshi": "🔵"}).unique().tolist())
+                n_bets = len(grp)
+
+                # Event header
+                st.markdown(f"""
+<div style="background:#111;border:1px solid #1E1E1E;border-left:3px solid {ec};border-radius:8px;padding:14px 18px;margin-bottom:2px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <div>
+      <div style="font-size:15px;font-weight:600;color:#FFF;">{event_name}</div>
+      <div style="font-size:11px;color:#555;margin-top:3px;">{src_icons} · Closes {closes} · {n_bets} market{"s" if n_bets != 1 else ""}</div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:10px;color:#444;letter-spacing:0.08em;text-transform:uppercase;">Best Edge</div>
+      <div style="font-size:22px;font-weight:700;color:{ec};">{best_edge}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+                # Bet rows under this event
+                rows_html = ""
+                for _, bet in grp.iterrows():
+                    cp = bet["current_price"]
+                    chg = bet["price_change_pct"]
+                    es = int(bet["edge_score"])
+                    bec = edge_score_color(es)
+                    chg_color = "#00C2A8" if chg > 0 else "#DC2626"
+                    chg_str = f"+{chg:.1f}%" if chg > 0 else f"{chg:.1f}%"
+                    # Outcome label — try to extract the specific team/outcome from the ticker
+                    # Kalshi tickers encode the outcome in the last segment after the last hyphen
+                    # e.g. KXNBAWIN-26MAR12BOSOKC-BOS → outcome is BOS
+                    #      KXNBAWIN-26MAR12BOSOKC-OKC → outcome is OKC
+                    import re as _re
+                    raw_ticker = str(bet.get("ticker", ""))
+                    outcome = bet["event_ticker"]
+
+                    # Strategy 1: pull team/outcome from last hyphen segment of ticker
+                    ticker_parts = raw_ticker.upper().split("-")
+                    last_seg = ticker_parts[-1] if ticker_parts else ""
+                    # Valid outcome segment: 2-5 uppercase letters (team code) or a number pattern
+                    if last_seg and _re.match(r'^[A-Z]{2,5}$', last_seg) and last_seg not in {"YES","NO","WIN","THE","FOR","AND"}:
+                        outcome_label = last_seg  # e.g. BOS, OKC, LAL, GSW
+                    # Strategy 2: look for "by X-Y" or numeric score patterns in the title
+                    elif _re.search(r'\d+-\d+', outcome):
+                        outcome_label = _re.search(r'\d+-\d+', outcome).group(0)
+                    # Strategy 3: extract "over/under X" from title
+                    elif _re.search(r'(over|under)\s+[\d.]+', outcome, _re.IGNORECASE):
+                        outcome_label = _re.search(r'(over|under)\s+[\d.]+', outcome, _re.IGNORECASE).group(0).title()
+                    # Strategy 4: title has team name before "winner" / "to win"
+                    elif _re.search(r'^(.+?)\s+(winner|to win|wins)\??\s*$', outcome, _re.IGNORECASE):
+                        m = _re.search(r'^(.+?)\s+(winner|to win|wins)\??\s*$', outcome, _re.IGNORECASE)
+                        outcome_label = m.group(1).strip()
+                        # Trim long prefixes — if it contains "at" or "vs", take the part after
+                        if " at " in outcome_label.lower():
+                            outcome_label = outcome_label.split(" at ")[-1].strip()
+                        elif " vs " in outcome_label.lower():
+                            outcome_label = outcome_label.split(" vs ")[-1].strip()
+                    else:
+                        outcome_label = outcome  # fallback: show full title
+
+                    rows_html += f"""
+<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 18px 10px 28px;border-bottom:1px solid #151515;cursor:pointer;" onclick="">
+  <div style="flex:1;font-size:13px;color:#CCC;">{outcome_label}</div>
+  <div style="font-size:13px;color:#FFF;font-weight:600;width:60px;text-align:right;">{cp:.0%}</div>
+  <div style="font-size:12px;color:{chg_color};width:70px;text-align:right;">{chg_str}</div>
+  <div style="font-size:13px;font-weight:700;color:{bec};width:50px;text-align:right;">{es}</div>
+</div>"""
+
+                st.markdown(f"""
+<div style="background:#0D0D0D;border:1px solid #1A1A1A;border-radius:0 0 8px 8px;margin-bottom:16px;overflow:hidden;">
+  <div style="display:flex;justify-content:space-between;padding:8px 18px 8px 28px;border-bottom:1px solid #1E1E1E;">
+    <div style="font-size:10px;color:#444;letter-spacing:0.08em;flex:1;">OUTCOME</div>
+    <div style="font-size:10px;color:#444;letter-spacing:0.08em;width:60px;text-align:right;">PROB</div>
+    <div style="font-size:10px;color:#444;letter-spacing:0.08em;width:70px;text-align:right;">CHANGE</div>
+    <div style="font-size:10px;color:#444;letter-spacing:0.08em;width:50px;text-align:right;">EDGE</div>
+  </div>
+  {rows_html}
+</div>""", unsafe_allow_html=True)
+
+        else:
+            # No search — flat table, top 20
+            st.markdown("### Markets ranked by Edge Score")
+            st.markdown("<div style='color:#444;font-size:12px;margin-bottom:16px;'>Search a topic above to group markets by event.</div>", unsafe_allow_html=True)
+            flat_df = display_df.copy()
+            flat_df["Edge"] = flat_df["edge_score"].apply(
+                lambda s: f'<span style="color:{edge_score_color(s)};font-weight:700;">{s}</span> <span style="font-size:10px;color:{edge_score_color(s)};">{edge_score_label(s)}</span>'
+            )
+            flat_df["Probability"] = flat_df["current_price"].apply(lambda x: f"{x:.0%}")
+            flat_df["Change"] = flat_df["price_change_pct"].apply(
+                lambda x: f'<span style="color:#00C2A8;">+{x:.1f}%</span>' if x > 0 else f'<span style="color:#DC2626;">{x:.1f}%</span>'
+            )
+            flat_df["Source"] = flat_df["source"].map(SOURCE_LABELS).fillna(flat_df["source"])
+            tbl = flat_df[["enriched_title", "category", "Source", "Probability", "Closes", "Change", "Edge"]].copy()
+            tbl.columns = ["Market", "Category", "Source", "Probability", "Closes", "Change", "Edge Score"]
+            st.write(tbl.to_html(escape=False, index=False), unsafe_allow_html=True)
 
         st.markdown("---")
-        st.markdown("### Deep Research")
-        st.markdown("<div style='color:#444;font-size:12px;margin-bottom:16px;'>Select a market for full AI analysis with news and mispricing verdict.</div>", unsafe_allow_html=True)
+        st.markdown("### 🔬 Deep Research")
+        st.markdown("<div style='color:#444;font-size:12px;margin-bottom:16px;'>Select any market for full AI analysis — news, fair value, and mispricing verdict.</div>", unsafe_allow_html=True)
 
-        # Market selector
-        market_options = df_res["event_ticker"].tolist()[:30]
-        selected_market = st.selectbox("Select market to research", market_options, key="res_market_select")
+        # Market selector uses enriched titles for readability
+        market_options = display_df["event_ticker"].tolist()
+        market_labels  = display_df["enriched_title"].tolist()
+        label_to_ticker = dict(zip(market_labels, market_options))
+
+        selected_label  = st.selectbox("Select market to research", market_labels, key="res_market_select")
+        selected_market = label_to_ticker.get(selected_label, market_options[0] if market_options else "")
 
         if st.button("🔬 Run Deep Research", key="run_research"):
             row = df_res[df_res["event_ticker"] == selected_market].iloc[0]
