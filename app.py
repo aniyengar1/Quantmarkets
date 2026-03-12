@@ -351,6 +351,14 @@ def build_markets_df(df):
     df_m["days_to_close"]    = (
         pd.to_datetime(df_m["close_time"], errors="coerce").dt.tz_localize(None) - pd.Timestamp.now()
     ).dt.days
+    # Liquidity proxy: count number of snapshots per ticker (more snapshots = more activity = more liquid)
+    snapshot_counts = df.groupby("ticker").size().reset_index(name="snapshot_count")
+    df_m = df_m.merge(snapshot_counts, on="ticker", how="left")
+    df_m["snapshot_count"] = df_m["snapshot_count"].fillna(1)
+    # Spread proxy: std of mid_price across snapshots (higher std = wider effective spread / more volatile)
+    price_std = df.groupby("ticker")["mid_price"].std().reset_index(name="price_std")
+    df_m = df_m.merge(price_std, on="ticker", how="left")
+    df_m["price_std"] = df_m["price_std"].fillna(0)
     return df_m
 
 def parse_strategy_with_claude(user_input):
@@ -784,64 +792,50 @@ with tab3:
 
 def enrich_title_with_context(title, ticker, close_time):
     """
-    Parse Kalshi event_ticker to extract opponent/game context and append to title.
-    Patterns: KXLUKA-26MAR12-LAL-BOS → "(vs BOS · 12 Mar)"
-              KXLEBRON-26MAR15-MIA → "(vs MIA · 15 Mar)"
-              KXCL-26MAR12-ARSENAL-PSG → "(Arsenal vs PSG · 12 Mar)"
+    Parse Kalshi ticker to extract game matchup.
+    Format: KXNBA3PT-26MAR10BOSSAS-BOSJBROWN7-4
+      - 26MAR10BOSSAS = Mar 10, BOS vs SAS (two 3-letter codes concatenated)
     """
     import re
     if not ticker or not isinstance(ticker, str):
         return title
-
-    # Already has opponent in title
-    if " vs " in title.lower() or "against" in title.lower():
+    if " vs " in title.lower():
         return title
 
-    # Parse date from ticker — pattern: 26MAR12 = Mar 12 2026
+    t = ticker.upper()
+
+    # Find segment containing date — e.g. "26MAR10BOSSAS"
+    date_seg_match = re.search(r'(\d{2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2})([A-Z]+)?', t)
+    if not date_seg_match:
+        return title
+
+    month_names = {"JAN":"Jan","FEB":"Feb","MAR":"Mar","APR":"Apr","MAY":"May","JUN":"Jun",
+                   "JUL":"Jul","AUG":"Aug","SEP":"Sep","OCT":"Oct","NOV":"Nov","DEC":"Dec"}
+    date_part = date_seg_match.group(1)  # e.g. "26MAR10"
+    team_str  = date_seg_match.group(2) or ""  # e.g. "BOSSAS"
+
+    # Parse date
+    d_match = re.match(r'\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})', date_part)
     date_str = ""
-    date_match = re.search(r'\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})', ticker.upper())
-    if date_match:
-        month = date_match.group(1)
-        day   = date_match.group(2)
-        date_str = f"{int(day)} {month.capitalize()}"
+    if d_match:
+        date_str = f"{int(d_match.group(2))} {month_names[d_match.group(1)]}"
 
-    # Extract team abbreviations after the date — e.g. LAL-BOS, MIA, ARSENAL-PSG
-    parts = ticker.upper().split("-")
-    # Find date part index
-    date_idx = None
-    for i, p in enumerate(parts):
-        if re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)', p):
-            date_idx = i
-            break
+    # Parse teams — 6 chars = two 3-letter codes, e.g. BOSSAS = BOS + SAS
+    context = ""
+    if len(team_str) == 6:
+        t1, t2 = team_str[:3], team_str[3:]
+        context = f"({t1} vs {t2}"
+    elif len(team_str) == 3:
+        context = f"(vs {team_str}"
 
-    teams = []
-    if date_idx is not None:
-        # Everything after the date segment is team info
-        team_parts = parts[date_idx+1:]
-        # Filter out option suffixes (single words like WHAT, YES, NO, TRIA etc)
-        known_suffixes = {"WHAT","YES","NO","TRIA","TRAI","OVER","UNDER","MORE","LESS","WIN","LOSE"}
-        teams = [p for p in team_parts if p not in known_suffixes and len(p) >= 2 and len(p) <= 8]
-
-    if not teams and not date_str:
+    if context and date_str:
+        context += f" · {date_str})"
+    elif context:
+        context += ")"
+    elif date_str:
+        context = f"({date_str})"
+    else:
         return title
-
-    if len(teams) == 2:
-        context = f"({teams[0]} vs {teams[1]}"
-    elif len(teams) == 1:
-        context = f"(vs {teams[0]}"
-    else:
-        context = f"("
-
-    if date_str:
-        if context == "(":
-            context = f"({date_str})"
-        else:
-            context += f" · {date_str})"
-    else:
-        if context != "(":
-            context += ")"
-        else:
-            return title
 
     return f"{title} {context}"
 
@@ -970,16 +964,31 @@ def generate_market_research(market_title, current_price, category, edge_score, 
     else:
         news_block = "No recent news found."
 
-    system = """You are a sharp prediction market analyst. Your job is to assess whether a prediction market is fairly priced.
-Be concise, direct, and data-driven. No fluff. Think like a quant who also reads the news.
+    system = """You are an elite prediction market analyst — think Nate Silver meets a sharp sports bettor.
+Your job: assess whether a market is mispriced given ALL available evidence.
+
+Rules:
+- Be brutally specific. If a team lost 3-0 in the first leg, say that. If a player is injured, say that. If a candidate is up 12 points in polls, say that.
+- Reference the news headlines directly — quote the key fact, not vague summaries.
+- Never say "market may be mispriced" — give a verdict and own it.
+- Price drift is a signal: if a market dropped 40%, something happened. Identify what from the news.
+- Use base rates aggressively: "Teams down 3-0 after first leg advance ~2% of the time historically."
+- Fair value should reflect your actual probability estimate, not just echo the current price.
+- For confidence_band: bear_case is your low estimate (pessimistic scenario), bull_case is your high estimate (optimistic scenario). These should be meaningfully different from fair_value — typically ±10-25% depending on uncertainty.
+- For narrative_flag: set to true if the price moved significantly (>15%) but the news headlines do NOT clearly explain why. This signals a hidden information edge.
+
 Return ONLY a valid JSON object with exactly these fields:
 {
-  "fair_value": <float 0.01-0.99, your estimate of true probability>,
+  "fair_value": <float 0.01-0.99, your genuine probability estimate>,
+  "bear_case": <float 0.01-0.99, low end of fair value range>,
+  "bull_case": <float 0.01-0.99, high end of fair value range>,
   "verdict": "OVERPRICED" | "UNDERPRICED" | "FAIRLY PRICED",
   "confidence": "HIGH" | "MEDIUM" | "LOW",
-  "reasoning": "<2-3 sharp sentences explaining your verdict. Reference the news if relevant. Be specific.>",
-  "key_risk": "<single biggest factor that could make you wrong>",
-  "base_rate": "<relevant historical base rate if you know one, e.g. incumbents win 70% of elections, or N/A>"
+  "reasoning": "<2-3 razor-sharp sentences. Name the specific event, score, or data point. No vagueness.>",
+  "key_risk": "<single most specific factor that could flip this>",
+  "base_rate": "<hard historical stat if known, otherwise N/A>",
+  "narrative_flag": <true if price moved big but news does not explain it, false otherwise>,
+  "narrative_flag_reason": "<if narrative_flag is true, one sentence explaining the gap — e.g. 'Price dropped 35% but no news found explaining the move — possible insider information or off-platform event'>"
 }"""
 
     prompt = f"""Market: {market_title}
@@ -988,10 +997,12 @@ Category: {category}
 Edge score: {edge_score}/100
 Price change: {price_change_pct:+.1f}% since first observed
 
-Recent news:
+IMPORTANT: A price change of {price_change_pct:+.1f}% is a strong signal. If it is a large move, something specific happened — identify it from the news and name it explicitly in your reasoning.
+
+Recent news headlines (most recent first):
 {news_block}
 
-Assess this market. Is it fairly priced?"""
+Task: Give a sharp, specific verdict. Reference the actual news events by name. If a game result, score, or specific development is visible in the headlines, cite it directly."""
 
     try:
         r = requests.post(
@@ -1034,6 +1045,30 @@ def render_research_card(row, research, news, edge_score, df_all):
         diff_str = f"+{fv_diff:.0%}" if fv_diff >= 0 else f"{fv_diff:.0%}"
         diff_color = "#00C2A8" if fv_diff > 0.02 else "#DC2626" if fv_diff < -0.02 else "#F59E0B"
 
+        bear = research.get("bear_case", max(0.01, fv - 0.12))
+        bull = research.get("bull_case", min(0.99, fv + 0.12))
+        narrative_flag = research.get("narrative_flag", False)
+        narrative_reason = research.get("narrative_flag_reason", "")
+
+        # Liquidity assessment
+        snap = row.get("snapshot_count", 1)
+        std  = row.get("price_std", 0)
+        if snap >= 5 and std < 0.05:
+            liq_label, liq_color, liq_desc = "HIGH", "#00C2A8", "Active market, tight spread"
+        elif snap >= 3 or std < 0.10:
+            liq_label, liq_color, liq_desc = "MEDIUM", "#F59E0B", "Moderate activity"
+        else:
+            liq_label, liq_color, liq_desc = "LOW", "#DC2626", "Thin market — wide spread risk"
+
+        # Confidence band bar — visual range
+        band_pct = bull - bear
+        bear_left = f"{bear:.0%}"
+        bull_right = f"{bull:.0%}"
+        fv_pct = f"{fv:.0%}"
+        # position of fair value within band as % for CSS
+        band_range = max(bull - bear, 0.01)
+        fv_pos = min(max((fv - bear) / band_range * 100, 5), 95)
+
         verdict_html = f"""
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;">
   <div style="background:#111;border:1px solid #1E1E1E;border-radius:8px;padding:16px;text-align:center;">
@@ -1042,27 +1077,58 @@ def render_research_card(row, research, news, edge_score, df_all):
   </div>
   <div style="background:#111;border:1px solid #1E1E1E;border-radius:8px;padding:16px;text-align:center;">
     <div style="font-size:10px;color:#555;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:6px;">Fair Value</div>
-    <div style="font-size:28px;font-weight:700;color:{diff_color};">{fv:.0%} <span style="font-size:14px;">({diff_str})</span></div>
+    <div style="font-size:28px;font-weight:700;color:{{diff_color}};">{fv:.0%} <span style="font-size:14px;">({{diff_str}})</span></div>
   </div>
-  <div style="background:#111;border:1px solid {vc};border-radius:8px;padding:16px;text-align:center;">
+  <div style="background:#111;border:1px solid {{vc}};border-radius:8px;padding:16px;text-align:center;">
     <div style="font-size:10px;color:#555;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:6px;">Verdict</div>
-    <div style="font-size:18px;font-weight:700;color:{vc};">{verdict}</div>
-    <div style="font-size:10px;color:#555;margin-top:4px;">{confidence} confidence</div>
+    <div style="font-size:18px;font-weight:700;color:{{vc}};">{{verdict}}</div>
+    <div style="font-size:10px;color:#555;margin-top:4px;">{{confidence}} confidence</div>
   </div>
 </div>
-<div style="background:#0D0D0D;border:1px solid #1A1A1A;border-left:3px solid {vc};border-radius:6px;padding:16px;margin-bottom:12px;">
-  <div style="font-size:11px;color:#888;line-height:1.7;">{reasoning}</div>
+
+<div style="background:#0D0D0D;border:1px solid #1A1A1A;border-radius:8px;padding:16px;margin-bottom:12px;">
+  <div style="font-size:10px;color:#555;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:10px;">📊 Confidence Band — Fair Value Range</div>
+  <div style="display:flex;justify-content:space-between;font-size:11px;color:#666;margin-bottom:6px;">
+    <span>Bear {bear_left}</span>
+    <span style="color:#FFF;font-weight:600;">Fair Value {fv_pct}</span>
+    <span>Bull {bull_right}</span>
+  </div>
+  <div style="background:#1A1A1A;border-radius:4px;height:8px;position:relative;overflow:hidden;">
+    <div style="position:absolute;left:0;top:0;height:100%;width:100%;background:linear-gradient(90deg,#DC2626 0%,#F59E0B 50%,#00C2A8 100%);opacity:0.3;border-radius:4px;"></div>
+    <div style="position:absolute;left:{fv_pos:.0f}%;top:-2px;width:3px;height:12px;background:#FFF;border-radius:2px;transform:translateX(-50%);"></div>
+  </div>
+  <div style="font-size:10px;color:#444;margin-top:6px;text-align:center;">If correct, current price of {cp:.0%} is outside this range → potential edge</div>
 </div>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+
+<div style="background:#0D0D0D;border:1px solid #1A1A1A;border-left:3px solid {{vc}};border-radius:6px;padding:16px;margin-bottom:12px;">
+  <div style="font-size:11px;color:#888;line-height:1.7;">{{reasoning}}</div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px;">
   <div style="background:#0D0D0D;border:1px solid #1A1A1A;border-radius:6px;padding:12px;">
     <div style="font-size:10px;color:#555;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;">Key Risk</div>
-    <div style="font-size:12px;color:#CCC;">{key_risk}</div>
+    <div style="font-size:12px;color:#CCC;">{{key_risk}}</div>
   </div>
   <div style="background:#0D0D0D;border:1px solid #1A1A1A;border-radius:6px;padding:12px;">
     <div style="font-size:10px;color:#555;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;">Historical Base Rate</div>
-    <div style="font-size:12px;color:#CCC;">{base_rate}</div>
+    <div style="font-size:12px;color:#CCC;">{{base_rate}}</div>
   </div>
-</div>"""
+  <div style="background:#0D0D0D;border:1px solid {liq_color}22;border-radius:6px;padding:12px;">
+    <div style="font-size:10px;color:#555;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:4px;">Liquidity</div>
+    <div style="font-size:13px;font-weight:700;color:{liq_color};">{liq_label}</div>
+    <div style="font-size:10px;color:#555;margin-top:2px;">{liq_desc}</div>
+  </div>
+</div>
+{{% if narrative_flag %}}
+<div style="background:#1A0F00;border:1px solid #F59E0B44;border-left:3px solid #F59E0B;border-radius:6px;padding:14px;margin-bottom:12px;">
+  <div style="font-size:10px;color:#F59E0B;letter-spacing:0.1em;font-weight:700;text-transform:uppercase;margin-bottom:4px;">⚠️ Narrative Gap Detected</div>
+  <div style="font-size:12px;color:#CCC;">{{narrative_reason}}</div>
+</div>
+{{% endif %}}""".format(
+            diff_color=diff_color, diff_str=diff_str, vc=vc, verdict=verdict,
+            confidence=confidence, reasoning=reasoning, key_risk=key_risk,
+            base_rate=base_rate, narrative_flag=narrative_flag, narrative_reason=narrative_reason
+        )
     else:
         verdict_html = f"""
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
@@ -1133,6 +1199,12 @@ with tab4:
 
     # ── filter markets ────────────────────────────────────────────────────────
     df_res = df_markets.copy()
+    # Filter out markets that have already closed
+    now_utc = pd.Timestamp.now(tz="UTC")
+    df_res = df_res[
+        pd.to_datetime(df_res["close_time"], errors="coerce", utc=True).isna() |
+        (pd.to_datetime(df_res["close_time"], errors="coerce", utc=True) > now_utc)
+    ]
     if research_cat != "All":
         df_res = df_res[df_res["category"] == research_cat]
     if research_src == "Polymarket":
