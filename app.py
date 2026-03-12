@@ -257,6 +257,11 @@ def categorize(question):
         "lebron","mahomes","messi","ronaldo","curry","jokic","luka","giannis",
         "sga","gilgeous","lamar jackson","burrow","judge","ohtani","shohei",
         "djokovic","federer","nadal","serena","tiger woods","mcilroy",
+        "tatum","brown","jaylen","jayson","fox","bane","murray","morant","booker",
+        "harden","durant","embiid","lillard","mitchell","doncic","jokić",
+        "haaland","mbappe","salah","bellingham","vinicius","pedri","yamal",
+        "alcaraz","sinner","swiatek","medvedev","zverev",
+        "threes","rebounds","assists","steals","blocks","double double","triple double",
         "game 1","game 2","game 3","game 4","game 5","game 6","game 7",
         "first half","second half","first quarter","first period","regulation",
         "prop bet","player prop","team total","moneyline","ats","spread",
@@ -348,6 +353,8 @@ def build_markets_df(df):
     df_m = df_first.merge(df_latest[["ticker","current_price"]], on="ticker")
     df_m["price_change"]     = (df_m["current_price"] - df_m["mid_price"]).round(4)
     df_m["price_change_pct"] = ((df_m["price_change"] / df_m["mid_price"]) * 100).round(2)
+    # Cap outliers caused by near-zero opening prices
+    df_m["price_change_pct"] = df_m["price_change_pct"].clip(-200, 200)
     df_m["days_to_close"]    = (
         pd.to_datetime(df_m["close_time"], errors="coerce").dt.tz_localize(None) - pd.Timestamp.now()
     ).dt.days
@@ -689,14 +696,43 @@ with tab1:
     st.dataframe(top_movers.reset_index(drop=True), use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### 📋 Market Browser")
-    disp = df[["source","category","event_ticker","current_price","price_change_pct"]].copy()
-    disp["source"]        = disp["source"].map(SOURCE_LABELS).fillna(disp["source"])
-    disp["Resolves YES"]  = disp["current_price"].apply(lambda x: f"{x*100:.0f}%")
-    disp["Latest Change"] = disp["price_change_pct"].apply(lambda x: f"+{x:.1f}%" if x >= 0 else f"{x:.1f}%")
-    disp = disp[["source","category","event_ticker","Resolves YES","Latest Change"]]
-    disp.columns = ["Source","Category","Market","Resolves YES","Latest Change"]
-    st.dataframe(disp, use_container_width=True)
+    # ── helper to render a market table ──────────────────────────────────────
+    def render_market_table(df_t):
+        if df_t.empty:
+            st.info("No markets match current filters.")
+            return
+        disp = df_t[["source","category","event_ticker","current_price","price_change_pct","days_to_close"]].copy()
+        disp["Source"]       = disp["source"].map(SOURCE_LABELS).fillna(disp["source"])
+        disp["Resolves YES"] = disp["current_price"].apply(lambda x: f"{x*100:.0f}%")
+        disp["Change"]       = disp["price_change_pct"].apply(lambda x: f"+{x:.1f}%" if x >= 0 else f"{x:.1f}%")
+        disp["Closes in"]    = disp["days_to_close"].apply(
+            lambda d: f"{int(d)}d" if pd.notna(d) and d >= 0 else ("Expired" if pd.notna(d) else "—")
+        )
+        disp = disp[["Source","category","event_ticker","Resolves YES","Change","Closes in"]]
+        disp.columns = ["Source","Category","Market","Resolves YES","Change","Closes in"]
+        st.dataframe(disp.reset_index(drop=True), use_container_width=True)
+
+    # Split into upcoming (≤30 days) and long-term (>30 days)
+    upcoming = df[df["days_to_close"].between(0, 30)].sort_values("days_to_close", ascending=True)
+    longterm  = df[df["days_to_close"] > 30].sort_values("days_to_close", ascending=True)
+    no_date   = df[df["days_to_close"].isna()]
+
+    # ── Upcoming ─────────────────────────────────────────────────────────────
+    st.markdown(f"### ⚡ Upcoming — Next 30 Days &nbsp;<span style='font-size:14px;color:#555;font-weight:400;'>({len(upcoming):,} markets)</span>", unsafe_allow_html=True)
+    st.caption("Sorted by urgency — closest to closing first.")
+    render_market_table(upcoming)
+
+    st.markdown("---")
+
+    # ── Long-term ─────────────────────────────────────────────────────────────
+    with st.expander(f"📅  Long-term Markets — 30+ Days  ({len(longterm):,} markets)", expanded=False):
+        st.caption("Sorted by closest close date first.")
+        render_market_table(longterm)
+
+    # ── No close date ─────────────────────────────────────────────────────────
+    if not no_date.empty:
+        with st.expander(f"❔  No Close Date  ({len(no_date):,} markets)", expanded=False):
+            render_market_table(no_date)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 — SOURCES
@@ -1248,7 +1284,8 @@ with tab4:
         )
         display_df["Source"] = display_df["source"].map(SOURCE_LABELS).fillna(display_df["source"])
 
-        display_df["Closes"] = pd.to_datetime(display_df["close_time"], errors="coerce", utc=True).dt.strftime("%-d %b")
+        _closes_dt = pd.to_datetime(display_df["close_time"], errors="coerce", utc=True)
+        display_df["Closes"] = _closes_dt.dt.strftime("%d %b").str.lstrip("0").replace("", "—")
         display_df["event_ticker"] = display_df.apply(
             lambda r: enrich_title_with_context(r["event_ticker"], r["ticker"], r.get("close_time","")), axis=1
         )
