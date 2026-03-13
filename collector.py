@@ -371,10 +371,11 @@ def save_rows(rows):
     rows = df.to_dict("records")
 
     if os.path.exists(os.path.dirname(OUTPUT_FILE)):
-        df.to_csv(OUTPUT_FILE, mode="a", header=False, index=False)
-    else:
-        df.to_csv(OUTPUT_FILE, mode="w", header=True, index=False)
-    print(f"Saved {len(rows)} rows to CSV")
+        if os.path.exists(OUTPUT_FILE):
+            df.to_csv(OUTPUT_FILE, mode="a", header=False, index=False)
+        else:
+            df.to_csv(OUTPUT_FILE, mode="w", header=True, index=False)
+        print(f"Saved {len(rows)} rows to CSV")
 
     batch_size = 500
     total_saved = 0
