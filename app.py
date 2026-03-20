@@ -1002,7 +1002,7 @@ def fetch_news(query, max_articles=5):
         return []
 
 @st.cache_data(ttl=3600)
-def generate_market_research(market_title, current_price, category, edge_score, price_change_pct, news_headlines):
+def generate_market_research(market_title, current_price, category, edge_score, price_change_pct, news_headlines, today_date="", player_stats_summary=""):
     """Call Claude Sonnet to generate a sharp market research card."""
     if not ANTHROPIC_API_KEY:
         return None
@@ -1027,6 +1027,8 @@ RULES — follow these exactly:
 5. bear_case and bull_case are the realistic low/high range — typically ±8-20pp from fair_value.
 6. narrative_flag = true ONLY if price moved >15% AND the headlines don't explain why.
 7. reasoning must be 2-3 sentences, specific, no vague phrases like "market uncertainty" or "various factors".
+8. Use today's date to calculate current player ages accurately — do NOT use ages from prior seasons.
+9. If recent game stats are provided, use them as the primary form indicator over general reputation.
 
 Return ONLY valid JSON, no markdown, no explanation:
 {
@@ -1035,19 +1037,22 @@ Return ONLY valid JSON, no markdown, no explanation:
   "bull_case": <0.01-0.99>,
   "verdict": "OVERPRICED" | "UNDERPRICED" | "FAIRLY PRICED",
   "confidence": "HIGH" | "MEDIUM" | "LOW",
-  "reasoning": "<2-3 sharp sentences citing specific facts from the news>",
+  "reasoning": "<2-3 sharp sentences citing specific facts from the news or recent stats>",
   "key_risk": "<single most specific factor that could flip this verdict>",
   "base_rate": "<one hard historical stat, or N/A>",
   "narrative_flag": true | false,
   "narrative_flag_reason": "<one sentence if flag is true, else empty string>"
 }"""
 
+    stats_block = f"\nRecent player/team stats:\n{player_stats_summary}" if player_stats_summary else ""
+
     prompt = f"""Market: {market_title}
 Current probability: {current_price:.1%}
 Category: {category}
 Edge score: {edge_score}/100
 Price change: {price_change_pct:+.1f}% since tracking began
-
+Today's date: {today_date or "March 2026"}
+{stats_block}
 Recent news (most recent first):
 {news_block}
 
@@ -1298,7 +1303,9 @@ with tab4:
     if search_query.strip():
         # Strip common noise words that appear in almost every market title
         _search_stop = {"vs","the","a","an","in","of","to","by","for","at","on","is","are",
-                        "will","who","what","when","how","does","do","be","and","or","that"}
+                        "will","who","what","when","how","does","do","be","and","or","that",
+                        "if","its","with","from","this","has","had","have","more","than","over",
+                        "under","per","get","got","make","made","new","next","last","top"}
         terms = [t for t in search_query.lower().split() if len(t) > 1 and t not in _search_stop]
         if not terms:
             terms = [t for t in search_query.lower().split() if len(t) > 1]  # fallback if all stripped
@@ -1307,9 +1314,10 @@ with tab4:
         mask = df_res["event_ticker"].str.lower().apply(lambda t: all(term in t for term in terms))
         df_res = df_res[mask]
 
-        # Fallback: if AND returns nothing AND we have 2+ terms, relax to OR
-        # but only on meaningful terms (never on noise words like "vs")
+        # Fallback: if AND returns nothing AND we have 2+ terms, relax but require at least
+        # ceil(n/2) terms to match — avoids dumping in loosely related markets
         if df_res.empty and len(terms) > 1:
+            min_matches = max(2, -(-len(terms) // 2))  # ceil(n/2), minimum 2
             df_res_base = df_markets.copy()
             now_utc2 = pd.Timestamp.now(tz="UTC")
             df_res_base = df_res_base[
@@ -1322,10 +1330,12 @@ with tab4:
                 df_res_base = df_res_base[df_res_base["source"] == "polymarket"]
             elif research_src == "Kalshi":
                 df_res_base = df_res_base[df_res_base["source"] == "kalshi"]
-            mask_or = df_res_base["event_ticker"].str.lower().apply(lambda t: any(term in t for term in terms))
-            df_res = df_res_base[mask_or]
+            mask_partial = df_res_base["event_ticker"].str.lower().apply(
+                lambda t: sum(1 for term in terms if term in t) >= min_matches
+            )
+            df_res = df_res_base[mask_partial]
             if not df_res.empty:
-                st.caption(f"No exact matches — showing markets containing any of: {', '.join(terms)}")
+                st.caption(f"No exact matches — showing markets containing at least {min_matches} of: {', '.join(terms)}")
 
     # ── compute edge scores ───────────────────────────────────────────────────
     if not df_res.empty:
@@ -1398,49 +1408,60 @@ with tab4:
 </div>""", unsafe_allow_html=True)
 
                 # Bet rows under this event
+                import re as _re
+
+                def _extract_outcome_label(bet_row):
+                    raw_ticker = str(bet_row.get("ticker", ""))
+                    outcome = bet_row["event_ticker"]
+                    ticker_parts = raw_ticker.upper().split("-")
+                    last_seg = ticker_parts[-1] if ticker_parts else ""
+                    if last_seg and _re.match(r'^[A-Z]{2,5}$', last_seg) and last_seg not in {"YES","NO","WIN","THE","FOR","AND"}:
+                        return last_seg
+                    elif _re.search(r'\d+-\d+', outcome):
+                        return _re.search(r'\d+-\d+', outcome).group(0)
+                    elif _re.search(r'(over|under)\s+[\d.]+', outcome, _re.IGNORECASE):
+                        return _re.search(r'(over|under)\s+[\d.]+', outcome, _re.IGNORECASE).group(0).title()
+                    elif _re.search(r'^(.+?)\s+(winner|to win|wins)\??\s*$', outcome, _re.IGNORECASE):
+                        m = _re.search(r'^(.+?)\s+(winner|to win|wins)\??\s*$', outcome, _re.IGNORECASE)
+                        lbl = m.group(1).strip()
+                        if " at " in lbl.lower():
+                            lbl = lbl.split(" at ")[-1].strip()
+                        elif " vs " in lbl.lower():
+                            lbl = lbl.split(" vs ")[-1].strip()
+                        return lbl
+                    return outcome
+
+                # Pre-compute all outcome labels so we can derive the opponent
+                _outcome_labels = [_extract_outcome_label(bet_row) for _, bet_row in grp.iterrows()]
+                # Detect team-code outcomes (e.g. BOS, OKC) across the group
+                _team_code_re = _re.compile(r'^[A-Z]{2,5}$')
+                _team_codes_in_group = [lbl for lbl in _outcome_labels if _team_code_re.match(lbl)]
+
                 rows_html = ""
-                for _, bet in grp.iterrows():
+                for (_, bet), outcome_label in zip(grp.iterrows(), _outcome_labels):
                     cp = bet["current_price"]
                     chg = bet["price_change_pct"]
                     es = int(bet["edge_score"])
                     bec = edge_score_color(es)
                     chg_color = "#00C2A8" if chg > 0 else "#DC2626"
                     chg_str = f"+{chg:.1f}%" if chg > 0 else f"{chg:.1f}%"
-                    # Outcome label — try to extract the specific team/outcome from the ticker
-                    # Kalshi tickers encode the outcome in the last segment after the last hyphen
-                    # e.g. KXNBAWIN-26MAR12BOSOKC-BOS → outcome is BOS
-                    #      KXNBAWIN-26MAR12BOSOKC-OKC → outcome is OKC
-                    import re as _re
-                    raw_ticker = str(bet.get("ticker", ""))
-                    outcome = bet["event_ticker"]
 
-                    # Strategy 1: pull team/outcome from last hyphen segment of ticker
-                    ticker_parts = raw_ticker.upper().split("-")
-                    last_seg = ticker_parts[-1] if ticker_parts else ""
-                    # Valid outcome segment: 2-5 uppercase letters (team code) or a number pattern
-                    if last_seg and _re.match(r'^[A-Z]{2,5}$', last_seg) and last_seg not in {"YES","NO","WIN","THE","FOR","AND"}:
-                        outcome_label = last_seg  # e.g. BOS, OKC, LAL, GSW
-                    # Strategy 2: look for "by X-Y" or numeric score patterns in the title
-                    elif _re.search(r'\d+-\d+', outcome):
-                        outcome_label = _re.search(r'\d+-\d+', outcome).group(0)
-                    # Strategy 3: extract "over/under X" from title
-                    elif _re.search(r'(over|under)\s+[\d.]+', outcome, _re.IGNORECASE):
-                        outcome_label = _re.search(r'(over|under)\s+[\d.]+', outcome, _re.IGNORECASE).group(0).title()
-                    # Strategy 4: title has team name before "winner" / "to win"
-                    elif _re.search(r'^(.+?)\s+(winner|to win|wins)\??\s*$', outcome, _re.IGNORECASE):
-                        m = _re.search(r'^(.+?)\s+(winner|to win|wins)\??\s*$', outcome, _re.IGNORECASE)
-                        outcome_label = m.group(1).strip()
-                        # Trim long prefixes — if it contains "at" or "vs", take the part after
-                        if " at " in outcome_label.lower():
-                            outcome_label = outcome_label.split(" at ")[-1].strip()
-                        elif " vs " in outcome_label.lower():
-                            outcome_label = outcome_label.split(" vs ")[-1].strip()
-                    else:
-                        outcome_label = outcome  # fallback: show full title
+                    # Determine opposing side label
+                    opponent_html = ""
+                    if _team_code_re.match(outcome_label) and len(_team_codes_in_group) == 2:
+                        # Binary winner market — show "vs OPPONENT"
+                        opponent = next((c for c in _team_codes_in_group if c != outcome_label), None)
+                        if opponent:
+                            opponent_html = f" <span style='color:#444;font-size:11px;'>vs {opponent}</span>"
+                    elif not _team_code_re.match(outcome_label):
+                        # Try to pull matchup from enriched_title: (T1 vs T2 · date)
+                        matchup_m = _re.search(r'\(([A-Z]{2,4})\s+vs\s+([A-Z]{2,4})', str(bet.get("enriched_title", "")))
+                        if matchup_m:
+                            opponent_html = f" <span style='color:#444;font-size:11px;'>({matchup_m.group(1)} vs {matchup_m.group(2)})</span>"
 
                     rows_html += f"""
 <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 18px 10px 28px;border-bottom:1px solid #151515;cursor:pointer;" onclick="">
-  <div style="flex:1;font-size:13px;color:#CCC;">{outcome_label}</div>
+  <div style="flex:1;font-size:13px;color:#CCC;">{outcome_label}{opponent_html}</div>
   <div style="font-size:13px;color:#FFF;font-weight:600;width:60px;text-align:right;">{cp:.0%}</div>
   <div style="font-size:12px;color:{chg_color};width:70px;text-align:right;">{chg_str}</div>
   <div style="font-size:13px;font-weight:700;color:{bec};width:50px;text-align:right;">{es}</div>
@@ -1493,15 +1514,34 @@ with tab4:
             with st.spinner("Fetching news and generating analysis..."):
                 news_query   = build_news_query(row["event_ticker"], row["category"])
                 news         = fetch_news(news_query, max_articles=5)
-                research     = generate_market_research(
-                    market_title    = row["event_ticker"],
-                    current_price   = row["current_price"],
-                    category        = row["category"],
-                    edge_score      = edge,
-                    price_change_pct= row["price_change_pct"],
-                    news_headlines  = news,
-                )
                 sports_stats = detect_entity_and_fetch_stats(row["event_ticker"], row["category"])
+                # Build compact stats summary for AI prompt
+                stats_text = ""
+                if sports_stats and sports_stats.get("games"):
+                    games = sports_stats["games"]
+                    if sports_stats["type"] == "player":
+                        stats_text = (
+                            f"{sports_stats['player']} ({sports_stats.get('team','')}) "
+                            f"last {len(games)} games: " +
+                            ", ".join([f"{g['Date']}: {g['PTS']}pts/{g['REB']}reb/{g['AST']}ast" for g in games])
+                        )
+                    else:
+                        stats_text = (
+                            f"{sports_stats['team']} last {len(games)} games: " +
+                            ", ".join([f"{g['Date']}: {g.get('Score','?')} ({g.get('W/L','?')})" for g in games])
+                        )
+                import datetime as _dt
+                today_str = _dt.date.today().strftime("%B %d, %Y")
+                research     = generate_market_research(
+                    market_title         = row["event_ticker"],
+                    current_price        = row["current_price"],
+                    category             = row["category"],
+                    edge_score           = edge,
+                    price_change_pct     = row["price_change_pct"],
+                    news_headlines       = news,
+                    today_date           = today_str,
+                    player_stats_summary = stats_text,
+                )
 
             # Surface API errors visibly instead of silently failing
             if research and research.get("_error"):
