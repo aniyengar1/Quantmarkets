@@ -716,6 +716,20 @@ with tab1:
         disp.columns = ["Source","Category","Market","Resolves YES","Change","Closes in"]
         st.dataframe(disp.reset_index(drop=True), use_container_width=True)
 
+    # ── Sports Games This Week ────────────────────────────────────────────────
+    sports_week = (
+        df_markets[
+            (df_markets["category"] == "Sports") &
+            (df_markets["days_to_close"].between(0, 14))
+        ]
+        .sort_values("days_to_close", ascending=True)
+    )
+    if not sports_week.empty:
+        st.markdown(f"### Sports &amp; Games — Next 14 Days &nbsp;<span style='font-size:14px;color:#555;font-weight:400;'>({len(sports_week):,} markets)</span>", unsafe_allow_html=True)
+        st.caption("All sports game markets closing within 14 days, sorted by closest first.")
+        render_market_table(sports_week)
+        st.markdown("---")
+
     # Split into upcoming (≤30 days) and long-term (>30 days)
     upcoming = df[df["days_to_close"].between(0, 30)].sort_values("days_to_close", ascending=True)
     longterm  = df[df["days_to_close"] > 30].sort_values("days_to_close", ascending=True)
