@@ -331,9 +331,12 @@ def categorize(question):
 
 @st.cache_data(ttl=300)
 def load_data():
+    cutoff = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
     all_rows, offset, batch_size = [], 0, 1000
     while True:
         batch = supabase.table("market_prices").select("*")\
+            .neq("source", "kalshi_historical")\
+            .gte("close_time", cutoff)\
             .order("timestamp", desc=False)\
             .range(offset, offset + batch_size - 1).execute().data
         if not batch: break

@@ -388,8 +388,18 @@ def save_rows(rows):
             print(f"Supabase error on batch {i // batch_size + 1}: {e}")
     print(f"Saved {total_saved} rows to Supabase")
 
+def cleanup_expired_markets():
+    """Delete markets whose close_time is in the past (more than 4h ago as buffer)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        supabase.table("market_prices").delete().lt("close_time", cutoff).execute()
+        print(f"  Cleaned up expired markets (closed before {cutoff[:13]})")
+    except Exception as e:
+        print(f"  Cleanup error: {e}")
+
 def collect():
     print(f"\nRunning collector at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    cleanup_expired_markets()
     rows = []
     short_term = fetch_kalshi_short_term()
     all_kalshi = fetch_kalshi_live_markets()
@@ -402,7 +412,6 @@ def collect():
             seen.add(r["ticker"])
     rows.extend(short_term)
 
-    rows.extend(fetch_kalshi_historical_markets())
     rows.extend(fetch_polymarket_markets())
 
     print(f"\nTotal rows collected: {len(rows)}")
