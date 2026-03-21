@@ -1573,6 +1573,15 @@ with tab4:
                         )
                         if _rc[5].button("🔬 Research", key=f"dr_{bet['ticker']}", help="Run deep research"):
                             st.session_state["dr_ticker"] = bet["ticker"]
+                            st.session_state.pop("dr_ticker_result", None)
+                        # Render research card inline if this row's research is ready
+                        if st.session_state.get("dr_ticker_result") == bet["ticker"] and "research_card" in st.session_state:
+                            st.markdown(st.session_state["research_card"], unsafe_allow_html=True)
+                            if st.session_state.get("research_sports"):
+                                st.markdown(st.session_state["research_sports"], unsafe_allow_html=True)
+                            if st.button("✕ Clear", key=f"clear_dr_{bet['ticker']}"):
+                                for _k in ("research_card", "research_sports", "dr_ticker_result"):
+                                    st.session_state.pop(_k, None)
 
         # ── Inline deep research (triggered by per-row 🔬 buttons) ──────────────
         if st.session_state.get("dr_ticker"):
@@ -1607,8 +1616,9 @@ with tab4:
                 if _dr_research and _dr_research.get("_error"):
                     st.error(f"⚠️ AI verdict failed: {_dr_research['_error']}")
                     _dr_research = None
-                st.session_state["research_card"]  = render_research_card(_dr_row, _dr_research, _dr_news, _dr_edge, df_markets)
-                st.session_state["research_sports"] = render_stats_card(_dr_stats) if _dr_stats else ""
+                st.session_state["research_card"]    = render_research_card(_dr_row, _dr_research, _dr_news, _dr_edge, df_markets)
+                st.session_state["research_sports"]  = render_stats_card(_dr_stats) if _dr_stats else ""
+                st.session_state["dr_ticker_result"] = _dr_ticker
             st.session_state["dr_ticker"] = None
 
         st.markdown("---")
@@ -1680,8 +1690,8 @@ with tab4:
             st.session_state["research_card"]  = render_research_card(row, research, news, edge, df_markets)
             st.session_state["research_sports"] = render_stats_card(sports_stats) if sports_stats else ""
 
-        # Render from session state — persists without jumping tabs
-        if "research_card" in st.session_state:
+        # Render from session state — only for dropdown-triggered research (inline buttons render above)
+        if "research_card" in st.session_state and not st.session_state.get("dr_ticker_result"):
             st.markdown(st.session_state["research_card"], unsafe_allow_html=True)
             if st.session_state.get("research_sports"):
                 st.markdown(st.session_state["research_sports"], unsafe_allow_html=True)
