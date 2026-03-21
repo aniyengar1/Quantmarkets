@@ -1309,12 +1309,34 @@ with tab4:
                         "will","who","what","when","how","does","do","be","and","or","that",
                         "if","its","with","from","this","has","had","have","more","than","over",
                         "under","per","get","got","make","made","new","next","last","top"}
+        # Team nickname → city name aliases used in Kalshi/Polymarket event titles
+        _TEAM_ALIASES = {
+            "celtics": ["boston"], "knicks": ["new york"], "nets": ["brooklyn"],
+            "raptors": ["toronto"], "sixers": ["philadelphia"], "76ers": ["philadelphia"],
+            "bulls": ["chicago"], "cavaliers": ["cleveland"], "cavs": ["cleveland"],
+            "pistons": ["detroit"], "pacers": ["indiana"], "bucks": ["milwaukee"],
+            "hawks": ["atlanta"], "hornets": ["charlotte"], "heat": ["miami"],
+            "magic": ["orlando"], "wizards": ["washington"],
+            "nuggets": ["denver"], "timberwolves": ["minnesota"], "wolves": ["minnesota"],
+            "thunder": ["oklahoma"], "trailblazers": ["portland"], "blazers": ["portland"],
+            "jazz": ["utah"], "warriors": ["golden state"],
+            "lakers": ["los angeles"], "clippers": ["los angeles"],
+            "suns": ["phoenix"], "kings": ["sacramento"],
+            "mavericks": ["dallas"], "mavs": ["dallas"],
+            "rockets": ["houston"], "grizzlies": ["memphis"],
+            "pelicans": ["new orleans"], "spurs": ["san antonio"],
+        }
+        def _term_matches(title, term):
+            if term in _TEAM_ALIASES:
+                return term in title or any(a in title for a in _TEAM_ALIASES[term])
+            return term in title
+
         terms = [t for t in search_query.lower().split() if len(t) > 1 and t not in _search_stop]
         if not terms:
             terms = [t for t in search_query.lower().split() if len(t) > 1]  # fallback if all stripped
 
-        # AND logic — all meaningful terms must appear in the market title
-        mask = df_res["event_ticker"].str.lower().apply(lambda t: all(term in t for term in terms))
+        # AND logic — all meaningful terms must appear in the market title (alias-aware)
+        mask = df_res["event_ticker"].str.lower().apply(lambda t: all(_term_matches(t, term) for term in terms))
         df_res = df_res[mask]
 
         # Fallback: if AND returns nothing AND we have 2+ terms, relax but require at least
@@ -1334,7 +1356,7 @@ with tab4:
             elif research_src == "Kalshi":
                 df_res_base = df_res_base[df_res_base["source"] == "kalshi"]
             mask_partial = df_res_base["event_ticker"].str.lower().apply(
-                lambda t: sum(1 for term in terms if term in t) >= min_matches
+                lambda t: sum(1 for term in terms if _term_matches(t, term)) >= min_matches
             )
             df_res = df_res_base[mask_partial]
             if not df_res.empty:
@@ -1345,7 +1367,12 @@ with tab4:
         df_res = df_res.copy()
         df_res["edge_score"] = df_res.apply(lambda r: compute_edge_score(r, df_markets), axis=1)
         df_res["_sort_days"] = df_res["days_to_close"].fillna(9999)
-        df_res = df_res.sort_values(["_sort_days", "edge_score"], ascending=[True, False]).reset_index(drop=True)
+        df_res = (
+            df_res
+            .sort_values(["_sort_days", "edge_score"], ascending=[True, False])
+            .drop_duplicates(subset=["event_ticker"], keep="first")
+            .reset_index(drop=True)
+        )
 
     # ── summary bar ───────────────────────────────────────────────────────────
     if not df_res.empty:
