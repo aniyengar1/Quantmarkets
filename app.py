@@ -1383,12 +1383,18 @@ with tab4:
         df_res = df_res.copy()
         df_res["edge_score"] = df_res.apply(lambda r: compute_edge_score(r, df_markets), axis=1)
         df_res["_sort_days"] = df_res["days_to_close"].fillna(9999)
-        df_res = (
-            df_res
-            .sort_values(["_sort_days", "edge_score"], ascending=[True, False])
-            .drop_duplicates(subset=["event_ticker"], keep="first")
-            .reset_index(drop=True)
-        )
+        df_res = df_res.sort_values(["_sort_days", "edge_score"], ascending=[True, False]).reset_index(drop=True)
+        # Pre-compute game_key and market_type so the display loop can use them
+        # (functions defined inside the tab block below, after df_res is built)
+        # Collapse mention markets only — keep 1 per game, preserve all other outcomes
+        _gk_tmp = df_res["ticker"].str.upper().str.extract(
+            r'(\d{2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}[A-Z]{6})'
+        )[0].fillna(df_res["event_ticker"])
+        _is_mention = df_res["ticker"].str.upper().str.startswith(("KXNBAMENTION","KXNCAABMENTION"))
+        df_res = pd.concat([
+            df_res[~_is_mention],
+            df_res[_is_mention].assign(_gk=_gk_tmp[_is_mention]).drop_duplicates(subset=["_gk"], keep="first").drop(columns=["_gk"], errors="ignore")
+        ]).sort_values(["_sort_days", "edge_score"], ascending=[True, False]).reset_index(drop=True)
 
     # ── summary bar ───────────────────────────────────────────────────────────
     if not df_res.empty:
@@ -1416,144 +1422,155 @@ with tab4:
             t = re.sub(r'\b(winner|to win|wins|spread|moneyline|total|over|under|by \d[\d-]*)\s*$', '', t, flags=re.IGNORECASE).strip()
             return t if t else title
 
+        def extract_game_key(ticker, event_ticker):
+            """Extract a stable game identifier from Kalshi tickers (e.g. '26MAR10CHAPOR').
+            Falls back to extract_event_group(event_ticker) for Polymarket / non-game tickers."""
+            import re as _re2
+            if ticker and isinstance(ticker, str):
+                m = _re2.search(
+                    r'(\d{2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2})([A-Z]{6})',
+                    ticker.upper()
+                )
+                if m:
+                    return m.group(0)
+            return extract_event_group(event_ticker)
+
+        def get_market_type(ticker):
+            """Map Kalshi ticker prefix to a human-readable market type."""
+            if not ticker or not isinstance(ticker, str):
+                return "Market"
+            t = ticker.upper()
+            if any(t.startswith(p) for p in ["KXNBAGAME","KXNCAABBGAME","KXNCAAWBGAME","KXNHLGAME","KXMLSGAME"]):
+                return "Game Winner"
+            if any(t.startswith(p) for p in ["KXNBASPREAD","KXNBA1HSPREAD","KXNBA2HSPREAD"]):
+                return "Spread"
+            if any(t.startswith(p) for p in ["KXNBATOTAL","KXNBA1HTOTAL","KXNBA2HTOTAL"]):
+                return "Total Points"
+            if any(t.startswith(p) for p in ["KXNBA1HWINNER","KXNBA2HWINNER"]):
+                return "Half Winner"
+            if any(t.startswith(p) for p in ["KXNBA2D","KXNBA3D"]):
+                return "Lead After Q"
+            if any(t.startswith(p) for p in ["KXNBAPTS","KXNBAREB","KXNBAAST","KXNBA3PT","KXNBABLK","KXNBASTL",
+                                               "KXNHLPTS","KXNHLAST","KXNHLGOAL"]):
+                return "Player Prop"
+            if any(t.startswith(p) for p in ["KXNBAMENTION","KXNCAABMENTION"]):
+                return "Mention"
+            if any(t.startswith(p) for p in ["KXATPMATCH","KXWTAMATCH","KXATPSETWINNER","KXWTASETWINNER",
+                                               "KXCS2GAME","KXCS2MAP"]):
+                return "Match Winner"
+            if t.startswith("KXEPLGOAL"):
+                return "Goal Market"
+            return "Market"
+
         # Always include all near-term markets (≤7 days), fill remainder up to 80 from the rest
         near_term = df_res[df_res["days_to_close"].between(0, 7, inclusive="both")]
         the_rest   = df_res[~df_res.index.isin(near_term.index)]
-        display_df = pd.concat([near_term, the_rest]).head(80).copy()
+        display_df = pd.concat([near_term, the_rest]).head(200).copy()
         _closes_dt = pd.to_datetime(display_df["close_time"], errors="coerce", utc=True)
         display_df["Closes"] = _closes_dt.dt.strftime("%d %b").str.lstrip("0").replace("", "—")
         display_df["enriched_title"] = display_df.apply(
             lambda r: enrich_title_with_context(r["event_ticker"], r["ticker"], r.get("close_time", "")), axis=1
         )
-        display_df["event_group"] = display_df["enriched_title"].apply(extract_event_group)
+        display_df["game_key"] = display_df.apply(
+            lambda r: extract_game_key(r["ticker"], r["event_ticker"]), axis=1
+        )
+        display_df["market_type"] = display_df["ticker"].apply(get_market_type)
 
-        # When a search is active, show grouped view; otherwise flat table
-        if search_query.strip():
-            st.markdown("### Markets by Event")
-            # Sort groups by proximity first, then best edge score
-            group_min_days = display_df.groupby("event_group")["days_to_close"].min()
-            group_best_edge = display_df.groupby("event_group")["edge_score"].max()
-            group_order = pd.DataFrame({"min_days": group_min_days, "best_edge": group_best_edge})
-            group_order = group_order.sort_values(["min_days", "best_edge"], ascending=[True, False], na_position="last")
+        # ── Unified game card + expander view ─────────────────────────────────
+        _TYPE_ORDER = ["Game Winner", "Match Winner", "Spread", "Total Points", "Half Winner",
+                       "Lead After Q", "Goal Market", "Player Prop", "Market", "Mention"]
 
-            for event_name in group_order.index:
-                grp = display_df[display_df["event_group"] == event_name].sort_values("edge_score", ascending=False)
-                best_edge = int(grp["edge_score"].max())
-                ec = edge_score_color(best_edge)
-                closes = grp["Closes"].iloc[0]
-                src_icons = " ".join(grp["source"].map({"polymarket": "🟣", "kalshi": "🔵"}).unique().tolist())
-                n_bets = len(grp)
-                # Temporal badge
-                _grp_days = group_order.loc[event_name, "min_days"]
-                if pd.notna(_grp_days) and _grp_days <= 0:
-                    _time_badge = " <span style='background:#00C2A8;color:#000;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;letter-spacing:0.05em;'>TODAY</span>"
-                elif pd.notna(_grp_days) and _grp_days <= 3:
-                    _time_badge = " <span style='background:#F59E0B;color:#000;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;letter-spacing:0.05em;'>THIS WEEK</span>"
-                else:
-                    _time_badge = ""
-
-                # Event header
-                st.markdown(f"""
-<div style="background:#111;border:1px solid #1E1E1E;border-left:3px solid {ec};border-radius:8px;padding:14px 18px;margin-bottom:2px;">
-  <div style="display:flex;justify-content:space-between;align-items:center;">
-    <div>
-      <div style="font-size:15px;font-weight:600;color:#FFF;">{event_name}{_time_badge}</div>
-      <div style="font-size:11px;color:#555;margin-top:3px;">{src_icons} · Closes {closes} · {n_bets} market{"s" if n_bets != 1 else ""}</div>
-    </div>
-    <div style="text-align:right;">
-      <div style="font-size:10px;color:#444;letter-spacing:0.08em;text-transform:uppercase;">Best Edge</div>
-      <div style="font-size:22px;font-weight:700;color:{ec};">{best_edge}</div>
-    </div>
-  </div>
-</div>""", unsafe_allow_html=True)
-
-                # Bet rows under this event
-                import re as _re
-
-                def _extract_outcome_label(bet_row):
-                    raw_ticker = str(bet_row.get("ticker", ""))
-                    outcome = bet_row["event_ticker"]
-                    ticker_parts = raw_ticker.upper().split("-")
-                    last_seg = ticker_parts[-1] if ticker_parts else ""
-                    if last_seg and _re.match(r'^[A-Z]{2,5}$', last_seg) and last_seg not in {"YES","NO","WIN","THE","FOR","AND"}:
-                        return last_seg
-                    elif _re.search(r'\d+-\d+', outcome):
-                        return _re.search(r'\d+-\d+', outcome).group(0)
-                    elif _re.search(r'(over|under)\s+[\d.]+', outcome, _re.IGNORECASE):
-                        return _re.search(r'(over|under)\s+[\d.]+', outcome, _re.IGNORECASE).group(0).title()
-                    elif _re.search(r'^(.+?)\s+(winner|to win|wins)\??\s*$', outcome, _re.IGNORECASE):
-                        m = _re.search(r'^(.+?)\s+(winner|to win|wins)\??\s*$', outcome, _re.IGNORECASE)
-                        lbl = m.group(1).strip()
-                        if " at " in lbl.lower():
-                            lbl = lbl.split(" at ")[-1].strip()
-                        elif " vs " in lbl.lower():
-                            lbl = lbl.split(" vs ")[-1].strip()
-                        return lbl
-                    return outcome
-
-                # Pre-compute all outcome labels so we can derive the opponent
-                _outcome_labels = [_extract_outcome_label(bet_row) for _, bet_row in grp.iterrows()]
-                # Detect team-code outcomes (e.g. BOS, OKC) across the group
-                _team_code_re = _re.compile(r'^[A-Z]{2,5}$')
-                _team_codes_in_group = [lbl for lbl in _outcome_labels if _team_code_re.match(lbl)]
-
-                rows_html = ""
-                for (_, bet), outcome_label in zip(grp.iterrows(), _outcome_labels):
-                    cp = bet["current_price"]
-                    chg = bet["price_change_pct"]
-                    es = int(bet["edge_score"])
-                    bec = edge_score_color(es)
-                    chg_color = "#00C2A8" if chg > 0 else "#DC2626"
-                    chg_str = f"+{chg:.1f}%" if chg > 0 else f"{chg:.1f}%"
-
-                    # Determine opposing side label
-                    opponent_html = ""
-                    if _team_code_re.match(outcome_label) and len(_team_codes_in_group) == 2:
-                        # Binary winner market — show "vs OPPONENT"
-                        opponent = next((c for c in _team_codes_in_group if c != outcome_label), None)
-                        if opponent:
-                            opponent_html = f" <span style='color:#444;font-size:11px;'>vs {opponent}</span>"
-                    elif not _team_code_re.match(outcome_label):
-                        # Try to pull matchup from enriched_title: (T1 vs T2 · date)
-                        matchup_m = _re.search(r'\(([A-Z]{2,4})\s+vs\s+([A-Z]{2,4})', str(bet.get("enriched_title", "")))
-                        if matchup_m:
-                            opponent_html = f" <span style='color:#444;font-size:11px;'>({matchup_m.group(1)} vs {matchup_m.group(2)})</span>"
-
-                    rows_html += f"""
-<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 18px 10px 28px;border-bottom:1px solid #151515;cursor:pointer;" onclick="">
-  <div style="flex:1;font-size:13px;color:#CCC;">{outcome_label}{opponent_html}</div>
-  <div style="font-size:13px;color:#FFF;font-weight:600;width:60px;text-align:right;">{cp:.0%}</div>
-  <div style="font-size:12px;color:{chg_color};width:70px;text-align:right;">{chg_str}</div>
-  <div style="font-size:13px;font-weight:700;color:{bec};width:50px;text-align:right;">{es}</div>
-</div>"""
-
-                st.markdown(f"""
-<div style="background:#0D0D0D;border:1px solid #1A1A1A;border-radius:0 0 8px 8px;margin-bottom:16px;overflow:hidden;">
-  <div style="display:flex;justify-content:space-between;padding:8px 18px 8px 28px;border-bottom:1px solid #1E1E1E;">
-    <div style="font-size:10px;color:#444;letter-spacing:0.08em;flex:1;">OUTCOME</div>
-    <div style="font-size:10px;color:#444;letter-spacing:0.08em;width:60px;text-align:right;">PROB</div>
-    <div style="font-size:10px;color:#444;letter-spacing:0.08em;width:70px;text-align:right;">CHANGE</div>
-    <div style="font-size:10px;color:#444;letter-spacing:0.08em;width:50px;text-align:right;">EDGE</div>
-  </div>
-  {rows_html}
-</div>""", unsafe_allow_html=True)
-
-        else:
-            # No search — flat table, top 20
-            st.markdown("### Markets ranked by Edge Score")
-            st.markdown("<div style='color:#444;font-size:12px;margin-bottom:16px;'>Search a topic above to group markets by event.</div>", unsafe_allow_html=True)
-            flat_df = display_df.copy()
-            flat_df["Edge"] = flat_df["edge_score"].apply(
-                lambda s: f'<span style="color:{edge_score_color(s)};font-weight:700;">{s}</span> <span style="font-size:10px;color:{edge_score_color(s)};">{edge_score_label(s)}</span>'
+        game_meta = (
+            display_df.groupby("game_key", sort=False)
+            .agg(
+                min_days=("days_to_close", "min"),
+                best_edge=("edge_score", "max"),
+                closes=("Closes", "first"),
+                n_markets=("ticker", "count"),
             )
-            flat_df["Probability"] = flat_df["current_price"].apply(lambda x: f"{x:.0%}")
-            flat_df["Change"] = flat_df["price_change_pct"].apply(
-                lambda x: f'<span style="color:#00C2A8;">+{x:.1f}%</span>' if x > 0 else f'<span style="color:#DC2626;">{x:.1f}%</span>'
+            .sort_values(["min_days", "best_edge"], ascending=[True, False], na_position="last")
+        )
+
+        st.markdown("### Games & Events")
+        for game_key, meta in game_meta.iterrows():
+            grp = display_df[display_df["game_key"] == game_key]
+
+            # Representative title: prefer a game/match winner row
+            winner_rows = grp[grp["market_type"].isin(["Game Winner", "Match Winner"])]
+            game_title = (winner_rows.iloc[0]["event_ticker"] if not winner_rows.empty
+                          else grp.iloc[0]["enriched_title"])
+
+            best_edge  = int(meta["best_edge"])
+            min_days   = meta["min_days"]
+            n_markets  = int(meta["n_markets"])
+            closes     = meta["closes"]
+            src_icons  = " ".join(grp["source"].map({"polymarket": "🟣", "kalshi": "🔵"}).dropna().unique())
+
+            badge = (" 🟢 TODAY" if pd.notna(min_days) and min_days <= 0
+                     else " 🟡 THIS WEEK" if pd.notna(min_days) and min_days <= 3
+                     else "")
+
+            types_in_grp = [t for t in _TYPE_ORDER if t in grp["market_type"].values]
+            type_chips = "  ".join(
+                f'<span style="background:#1A1A1A;color:#777;font-size:9px;padding:2px 6px;border-radius:3px;">{t}</span>'
+                for t in types_in_grp
             )
-            flat_df["Source"] = flat_df["source"].map(SOURCE_LABELS).fillna(flat_df["source"])
-            tbl = flat_df[["enriched_title", "category", "Source", "Probability", "Closes", "Change", "Edge"]].copy()
-            tbl.columns = ["Market", "Category", "Source", "Probability", "Closes", "Change", "Edge Score"]
-            st.write(tbl.to_html(escape=False, index=False), unsafe_allow_html=True)
+
+            exp_label = f"{game_title}{badge}  ·  {closes}  ·  {n_markets} market{'s' if n_markets != 1 else ''}"
+            auto_open = pd.notna(min_days) and min_days <= 1
+
+            with st.expander(exp_label, expanded=auto_open):
+                st.markdown(
+                    f'<div style="margin-bottom:10px;font-size:11px;color:#555;">'
+                    f'{src_icons} &nbsp; {type_chips}</div>',
+                    unsafe_allow_html=True
+                )
+                for mtype in _TYPE_ORDER:
+                    type_rows = grp[grp["market_type"] == mtype].sort_values("edge_score", ascending=False)
+                    if type_rows.empty:
+                        continue
+                    st.markdown(
+                        f'<div style="font-size:9px;color:#444;letter-spacing:0.1em;text-transform:uppercase;'
+                        f'padding:8px 0 4px;">{mtype}</div>',
+                        unsafe_allow_html=True
+                    )
+                    rows_html = (
+                        '<div style="display:flex;justify-content:space-between;padding:4px 0 4px;'
+                        'border-bottom:1px solid #1A1A1A;">'
+                        '<div style="flex:1;font-size:9px;color:#333;letter-spacing:0.08em;">MARKET</div>'
+                        '<div style="font-size:9px;color:#333;letter-spacing:0.08em;width:55px;text-align:right;">PROB</div>'
+                        '<div style="font-size:9px;color:#333;letter-spacing:0.08em;width:65px;text-align:right;">CHANGE</div>'
+                        '<div style="font-size:9px;color:#333;letter-spacing:0.08em;width:45px;text-align:right;">EDGE</div>'
+                        '<div style="width:55px;"></div>'
+                        '</div>'
+                    )
+                    for _, bet in type_rows.iterrows():
+                        cp        = bet["current_price"]
+                        chg       = bet["price_change_pct"]
+                        es        = int(bet["edge_score"])
+                        bec       = edge_score_color(es)
+                        chg_color = "#00C2A8" if chg > 0 else "#DC2626"
+                        chg_str   = f"+{chg:.1f}%" if chg > 0 else f"{chg:.1f}%"
+                        title_txt = bet["event_ticker"]
+                        src       = bet["source"]
+                        bet_url   = (
+                            f"https://polymarket.com/event/{bet['ticker']}"
+                            if src == "polymarket"
+                            else f"https://kalshi.com/markets/{str(bet['ticker']).split('-')[0].lower()}"
+                        )
+                        rows_html += (
+                            f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                            f'padding:8px 0;border-bottom:1px solid #151515;">'
+                            f'<div style="flex:1;font-size:13px;color:#CCC;padding-right:12px;">{title_txt}</div>'
+                            f'<div style="font-size:13px;color:#FFF;font-weight:600;width:55px;text-align:right;">{cp:.0%}</div>'
+                            f'<div style="font-size:12px;color:{chg_color};width:65px;text-align:right;">{chg_str}</div>'
+                            f'<div style="font-size:12px;font-weight:700;color:{bec};width:45px;text-align:right;">{es}</div>'
+                            f'<div style="width:55px;text-align:right;">'
+                            f'<a href="{bet_url}" target="_blank" style="font-size:10px;background:#FFF;color:#000;'
+                            f'padding:4px 8px;border-radius:3px;font-weight:700;text-decoration:none;">Bet →</a>'
+                            f'</div></div>'
+                        )
+                    st.markdown(rows_html, unsafe_allow_html=True)
 
         st.markdown("---")
         st.markdown("### 🔬 Deep Research")
