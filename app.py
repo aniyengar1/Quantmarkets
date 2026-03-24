@@ -1301,7 +1301,7 @@ with tab4:
     # ── search + filters ──────────────────────────────────────────────────────
     sr1, sr2, sr3 = st.columns([3, 1, 1])
     with sr1:
-        search_query = st.text_input("", placeholder="Search markets — e.g. 'LeBron', 'Trump', 'Bitcoin ETF', 'Lakers'...", key="research_query", label_visibility="collapsed")
+        search_query = st.text_input("Search markets", placeholder="Search markets — e.g. 'LeBron', 'Trump', 'Bitcoin ETF', 'Lakers'...", key="research_query", label_visibility="collapsed")
     with sr2:
         research_cat = st.selectbox("Category", ["All"] + sorted(df_markets["category"].unique().tolist()), key="res_cat", label_visibility="collapsed")
     with sr3:
