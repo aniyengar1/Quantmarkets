@@ -780,15 +780,76 @@ _SPORT_LABELS = {
     "KXCODGAME":    "🎮 CoD",
 }
 
-def get_sport_label(ticker):
-    """Return sport emoji + league from Kalshi ticker prefix, e.g. '🏀 NBA'."""
-    if not ticker or not isinstance(ticker, str):
+_SPORT_TITLE_KEYWORDS = [
+    # (label, must-contain-any, must-not-contain-any)
+    ("🏀 NBA",        ["nba","basketball"," lakers"," celtics"," warriors"," knicks"," nets",
+                       " bulls"," heat"," nuggets"," bucks"," suns"," clippers"," rockets",
+                       " sixers"," raptors"," maverick"," grizzl"," pelicans"," spurs",
+                       " pacers"," pistons"," cavaliers"," hawks"," magic"," hornets",
+                       " wizards"," thunder"," timberwolves"," jazz"," blazers"," kings",
+                       " golden state"," los angeles l"," los angeles c"], ["nhl","ncaa"]),
+    ("🏈 NFL",        ["nfl"," super bowl"," touchdown"," quarterback"," nfl "," chiefs",
+                       " patriots"," cowboys"," eagles"," steelers"," 49ers"," ravens",
+                       " bengals"," bills"," dolphins"," jets"," broncos"," raiders",
+                       " chargers"," colts"," titans"," jaguars"," texans"," browns",
+                       " bears"," packers"," vikings"," lions"," falcons"," panthers",
+                       " saints"," buccaneers"," cardinals"," rams"," seahawks"], ["nba","nhl","mlb"]),
+    ("🏒 NHL",        ["nhl","stanley cup","hockey"," bruins"," rangers"," maple leafs",
+                       " canadiens"," penguins"," flyers"," capitals"," lightning",
+                       " panthers nhl"," hurricanes"," devils"," islanders"," senators",
+                       " sabres"," red wings"," blue jackets"," predators"," blues",
+                       " avalanche"," stars nhl"," wild"," jets nhl"," flames"," oilers",
+                       " canucks"," sharks"," ducks"," coyotes"," golden knights"," kraken"], []),
+    ("⚾ MLB",        ["mlb","baseball"," world series"," home run"," pitcher"," innings",
+                       " yankees"," red sox"," dodgers"," cubs"," cardinals mlb"," braves",
+                       " mets"," phillies"," nationals"," marlins"," astros"," rangers mlb",
+                       " athletics"," angels"," mariners"," padres"," giants mlb",
+                       " rockies"," diamondbacks"," brewers"," twins"," white sox",
+                       " tigers"," indians"," guardians"," royals"," blue jays"," rays",
+                       " orioles"], []),
+    ("🏀 NCAAB",      ["ncaa basketball","march madness","ncaab","college basketball"], []),
+    ("🏈 NCAAF",      ["ncaa football","college football","ncaaf"], []),
+    ("⚽ EPL",        ["premier league","epl"," arsenal"," chelsea"," liverpool"," manchester",
+                       " tottenham"," everton"," newcastle"," aston villa"," west ham",
+                       " leicester"," wolves"," fulham"," brentford"," brighton"], ["la liga","bundesliga","serie a","ligue 1"]),
+    ("⚽ UCL",        ["champions league","ucl"], []),
+    ("⚽ MLS",        ["mls","major league soccer"], []),
+    ("⚽ La Liga",    ["la liga"," real madrid"," barcelona"," atletico"," sevilla"," valencia",
+                       " villarreal"," athletic bilbao"," real sociedad"," betis"], []),
+    ("⚽ Bundesliga", ["bundesliga"," bayern"," dortmund"," leverkusen"," frankfurt",
+                       " gladbach"," union berlin"," freiburg"], []),
+    ("⚽ Serie A",    ["serie a"," juventus"," inter milan"," ac milan"," napoli"," roma",
+                       " lazio"," atalanta"], []),
+    ("⚽ FIFA",       ["world cup","fifa"], []),
+    ("🎾 ATP",        ["atp","tennis"," djokovic"," alcaraz"," sinner"," medvedev"," zverev",
+                       " federer"," nadal"], ["wta"]),
+    ("🎾 WTA",        ["wta"," swiatek"," sabalenka"," gauff"," rybakina"], []),
+    ("🏏 Cricket",    ["cricket","ipl","test match"," ashes"], []),
+    ("🥊 Boxing/MMA", ["boxing","ufc","mma","fight","bout"," knockout"], []),
+    ("🏌️ Golf",       ["golf","pga","masters","open championship","ryder cup"," tiger woods"], []),
+    ("🏎️ F1",         ["formula 1","formula one","f1 ","grand prix"," verstappen"," hamilton f1"], []),
+    ("🏀 EuroLeague", ["euroleague","eurocup"], []),
+    ("⚽ Ligue 1",    ["ligue 1"," psg"," paris saint"], []),
+    ("🎮 Esports",    ["esports","cs2","counter-strike","valorant","league of legends",
+                       "call of duty","cod league","overwatch"], []),
+]
+
+def get_sport_label(ticker, event_ticker=""):
+    """Return sport emoji + league from Kalshi ticker prefix or title keywords."""
+    if ticker and isinstance(ticker, str):
+        t = ticker.upper()
+        for prefix in sorted(_SPORT_LABELS, key=len, reverse=True):
+            if t.startswith(prefix):
+                return _SPORT_LABELS[prefix]
+    # Fallback: infer from event title keywords (covers Polymarket)
+    title = (event_ticker or "").lower()
+    if not title:
         return ""
-    t = ticker.upper()
-    # Try longest prefix first to avoid KXNBA matching KXNBAGAME
-    for prefix in sorted(_SPORT_LABELS, key=len, reverse=True):
-        if t.startswith(prefix):
-            return _SPORT_LABELS[prefix]
+    for label, keywords, excludes in _SPORT_TITLE_KEYWORDS:
+        if excludes and any(ex in title for ex in excludes):
+            continue
+        if any(kw in title for kw in keywords):
+            return label
     return ""
 
 def edge_score_color(score):
@@ -984,7 +1045,7 @@ with tab1:
                 _md     = int(_gm["min_days"])
                 _badge  = " 🟢 TODAY" if _md <= 0 else (" 🟡 TOMORROW" if _md == 1 else
                           (" 🟡 THIS WEEK" if _md <= 6 else ""))
-                _sport  = get_sport_label(_grp.iloc[0]["ticker"]) if not _grp.empty else ""
+                _sport  = get_sport_label(_grp.iloc[0]["ticker"], _grp.iloc[0]["event_ticker"]) if not _grp.empty else ""
                 _sport_tag = f"[{_sport}]  " if _sport else ""
                 _label  = f"{_sport_tag}{_gtitle}{_badge}  ·  {_md}d  ·  {int(_gm['n_markets'])} markets  ·  Edge {int(_gm['best_edge'])}"
                 with st.expander(_label, expanded=(_md <= 1)):
@@ -1903,7 +1964,7 @@ with tab4:
                     for t in types_in_grp
                 )
 
-                _sport_lbl  = get_sport_label(grp.iloc[0]["ticker"]) if not grp.empty else ""
+                _sport_lbl  = get_sport_label(grp.iloc[0]["ticker"], grp.iloc[0]["event_ticker"]) if not grp.empty else ""
                 _sport_pfx  = f"[{_sport_lbl}]  " if _sport_lbl else ""
                 exp_label = f"{_sport_pfx}{game_title}{badge}  ·  {date_chip}  ·  {n_markets} market{'s' if n_markets != 1 else ''}"
 
