@@ -1529,7 +1529,8 @@ with tab4:
             if not ticker or not isinstance(ticker, str):
                 return "Market"
             t = ticker.upper()
-            if any(t.startswith(p) for p in ["KXNBAGAME","KXNCAABBGAME","KXNCAAWBGAME","KXNHLGAME","KXMLSGAME"]):
+            if any(t.startswith(p) for p in ["KXNBAGAME","KXNCAABBGAME","KXNCAAWBGAME","KXNHLGAME","KXMLSGAME",
+                                               "KXMLBGAME","KXUCLGAME","KXEPLGAME","KXNCAABGAME"]):
                 return "Game Winner"
             if any(t.startswith(p) for p in ["KXNBASPREAD","KXNBA1HSPREAD","KXNBA2HSPREAD"]):
                 return "Spread"
@@ -1566,6 +1567,26 @@ with tab4:
             lambda r: extract_game_key(r["ticker"], r["event_ticker"]), axis=1
         )
         display_df["market_type"] = display_df["ticker"].apply(get_market_type)
+
+        # When searching, enrich each matched game card with ALL related markets
+        # (props, spreads, totals) even if their titles didn't match the search query.
+        if search_query.strip():
+            _all_gk = df_markets.copy()
+            _all_gk["game_key"] = _all_gk.apply(
+                lambda r: extract_game_key(r["ticker"], r["event_ticker"]), axis=1
+            )
+            _matched_keys = set(display_df["game_key"].unique())
+            _related = _all_gk[_all_gk["game_key"].isin(_matched_keys)]
+            _new_rows = _related[~_related["ticker"].isin(set(display_df["ticker"]))].copy()
+            if not _new_rows.empty:
+                _new_rows["edge_score"] = _new_rows.apply(lambda r: compute_edge_score(r, _cat_avg), axis=1)
+                _ndt = pd.to_datetime(_new_rows["close_time"], errors="coerce", utc=True)
+                _new_rows["Closes"] = _ndt.dt.strftime("%d %b").str.lstrip("0").replace("", "—")
+                _new_rows["enriched_title"] = _new_rows.apply(
+                    lambda r: enrich_title_with_context(r["event_ticker"], r["ticker"], r.get("close_time", "")), axis=1
+                )
+                _new_rows["market_type"] = _new_rows["ticker"].apply(get_market_type)
+                display_df = pd.concat([display_df, _new_rows], ignore_index=True)
 
         # ── Unified game card + expander view ─────────────────────────────────
         _TYPE_ORDER = ["Game Winner", "Match Winner", "Spread", "Total Points", "Half Winner",

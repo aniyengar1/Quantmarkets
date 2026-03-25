@@ -397,16 +397,86 @@ def cleanup_expired_markets():
     except Exception as e:
         print(f"  Cleanup error: {e}")
 
+# Sports game series to fetch explicitly — ensures game winner markets are always
+# collected even when the general paginated fetch gets rate-limited.
+SPORTS_GAME_SERIES = [
+    "KXNBAGAME",    # NBA game winners
+    "KXNHLGAME",    # NHL game winners
+    "KXMLBGAME",    # MLB game winners
+    "KXUCLGAME",    # UEFA Champions League game winners
+    "KXEPLGAME",    # Premier League game winners
+    "KXMLSGAME",    # MLS game winners
+    "KXNCAABGAME",  # NCAA Men's Basketball game winners
+]
+
+def fetch_kalshi_sports_game_markets():
+    """Fetch game winner markets for all active sports series explicitly."""
+    print("Fetching sports game markets by series...")
+    now = datetime.now(timezone.utc)
+    timestamp = now.isoformat()
+    all_rows = []
+
+    for series in SPORTS_GAME_SERIES:
+        cursor = None
+        series_rows = []
+        for _ in range(5):  # up to 500 per series
+            params = {"limit": 100, "status": "open", "series_ticker": series}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                r = requests.get(f"{KALSHI_BASE}/markets", params=params, timeout=20)
+                if r.status_code == 429:
+                    break
+                if r.status_code != 200:
+                    break
+                data = r.json()
+                batch = data.get("markets", [])
+                for m in batch:
+                    ticker = m.get("ticker", "")
+                    if not ticker or any(ticker.startswith(p) for p in SKIP_TICKERS_PREFIX):
+                        continue
+                    mid_price = parse_kalshi_price(m)
+                    if mid_price is None:
+                        continue
+                    event_ticker = m.get("event_ticker", "")
+                    title = m.get("title", event_ticker)
+                    series_rows.append({
+                        "timestamp": timestamp,
+                        "source": "kalshi",
+                        "ticker": ticker,
+                        "event_ticker": title or event_ticker,
+                        "category": categorize(title or event_ticker),
+                        "mid_price": round(mid_price, 4),
+                        "open_time": m.get("open_time"),
+                        "close_time": m.get("close_time"),
+                    })
+                cursor = data.get("cursor")
+                if not cursor or len(batch) < 100:
+                    break
+            except Exception:
+                break
+        if series_rows:
+            print(f"  {series}: {len(series_rows)} markets")
+        all_rows.extend(series_rows)
+
+    return all_rows
+
+
 def collect():
     print(f"\nRunning collector at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     cleanup_expired_markets()
     rows = []
     short_term = fetch_kalshi_short_term()
     all_kalshi = fetch_kalshi_live_markets()
+    sports_games = fetch_kalshi_sports_game_markets()
 
-    # Merge — short-term first, deduplicate
+    # Merge — short-term first, then live, then targeted sports games; deduplicate throughout
     seen = {r["ticker"] for r in short_term}
     for r in all_kalshi:
+        if r["ticker"] not in seen:
+            short_term.append(r)
+            seen.add(r["ticker"])
+    for r in sports_games:
         if r["ticker"] not in seen:
             short_term.append(r)
             seen.add(r["ticker"])
