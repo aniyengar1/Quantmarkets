@@ -1071,7 +1071,7 @@ with tab2:
     def _normalise(title):
         """Lowercase, strip punctuation and common boilerplate for fuzzy matching."""
         t = title.lower()
-        t = re.sub(r'[^a-z0-9 ]', ' ', t)
+        t = _re_arb.sub(r'[^a-z0-9 ]', ' ', t)
         stops = {"will","the","a","an","in","of","to","by","for","at","on","is","are",
                  "does","do","who","what","when","win","wins","winner","be"}
         return " ".join(w for w in t.split() if w not in stops and len(w) > 1)
