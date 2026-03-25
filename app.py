@@ -862,6 +862,18 @@ def edge_score_label(score):
     elif score >= 55: return "MODERATE"
     else: return "WEAK"
 
+# ── Upgrade "Other" → "Sports" wherever get_sport_label detects a sport ──────
+# categorize() only sees the title text, so Kalshi game markets like
+# "Atlanta at Detroit Winner?" fall through to "Other".  Re-label them here
+# using the full ticker prefix lookup so every table and filter is correct.
+for _df_fix in [df_markets, df_poly_markets, df_kalshi_markets]:
+    if _df_fix.empty:
+        continue
+    _mask = (_df_fix["category"] == "Other") & _df_fix.apply(
+        lambda r: bool(get_sport_label(r.get("ticker", ""), r.get("event_ticker", ""))), axis=1
+    )
+    _df_fix.loc[_mask, "category"] = "Sports"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — OVERVIEW
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1575,7 +1587,7 @@ def render_research_card(row, research, news, edge_score, df_all):
 <div style="background:#111111;border:1px solid #1E1E1E;border-radius:12px;padding:24px;margin-bottom:16px;">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;">
     <div style="flex:1;margin-right:16px;">
-      <div style="font-size:10px;color:#444;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px;">{src_label} · {row['category']}</div>
+      <div style="font-size:10px;color:#444;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px;">{src_label} · {get_sport_label(row.get('ticker',''), row.get('event_ticker','')) or row['category']}</div>
       <div style="font-size:16px;font-weight:600;color:#FFF;line-height:1.4;">{row['event_ticker']}</div>
     </div>
     <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;">
