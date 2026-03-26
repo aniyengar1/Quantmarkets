@@ -543,53 +543,56 @@ def fetch_nba_player_stats(player_name):
     except Exception:
         return None
 
+def _score_str(v):
+    """ESPN returns score as either a plain string/number or {'value':120,'displayValue':'120'}."""
+    if isinstance(v, dict):
+        return v.get("displayValue") or str(int(v["value"])) if "value" in v else "?"
+    return str(v) if v not in (None, "", "?") else "?"
+
 @st.cache_data(ttl=3600)
 def fetch_espn_team_stats(team_name, sport="nba"):
-    """Fetch recent team stats via ESPN unofficial endpoint."""
+    """Fetch last 5 completed games for a team via ESPN unofficial endpoint."""
     try:
         sport_map = {
-            "nba": ("basketball", "nba"),
-            "nfl": ("football", "nfl"),
-            "mlb": ("baseball", "mlb"),
-            "nhl": ("hockey", "nhl"),
-            "soccer": ("soccer", "usa.1"),
+            "nba":    ("basketball", "nba"),
+            "nfl":    ("football",   "nfl"),
+            "mlb":    ("baseball",   "mlb"),
+            "nhl":    ("hockey",     "nhl"),
+            "soccer": ("soccer",     "usa.1"),
         }
-        s, league = sport_map.get(sport, ("basketball","nba"))
+        s, league = sport_map.get(sport, ("basketball", "nba"))
         r = requests.get(
             f"https://site.api.espn.com/apis/site/v2/sports/{s}/{league}/teams?limit=100",
             timeout=8
         ).json()
         teams = r.get("sports",[{}])[0].get("leagues",[{}])[0].get("teams",[])
-        match = next((t["team"] for t in teams if team_name.lower() in t["team"]["displayName"].lower()), None)
+        match = next(
+            (t["team"] for t in teams if team_name.lower() in t["team"]["displayName"].lower()),
+            None
+        )
         if not match: return None
         tid = match["id"]
-        # Get team schedule/results — completed games only
         sched = requests.get(
             f"https://site.api.espn.com/apis/site/v2/sports/{s}/{league}/teams/{tid}/schedule",
             timeout=8
         ).json()
-        all_events = sched.get("events", [])
-        # filter to only completed games
         completed = [
-            e for e in all_events
+            e for e in sched.get("events", [])
             if e.get("competitions",[{}])[0].get("status",{}).get("type",{}).get("completed", False)
         ]
-        events = completed[-5:] if completed else []
         rows = []
-        for e in events:
-            comp = e.get("competitions",[{}])[0]
-            comps = comp.get("competitors",[])
-            home = next((c for c in comps if c.get("homeAway")=="home"), {})
-            away = next((c for c in comps if c.get("homeAway")=="away"), {})
-            # determine W/L for this team
-            team_comp = next((c for c in comps if tid in str(c.get("team",{}).get("id",""))), {})
-            result = "W" if team_comp.get("winner") else "L"
+        for e in completed[-5:]:
+            comp  = e.get("competitions",[{}])[0]
+            comps = comp.get("competitors", [])
+            home  = next((c for c in comps if c.get("homeAway") == "home"), {})
+            away  = next((c for c in comps if c.get("homeAway") == "away"), {})
+            tc    = next((c for c in comps if tid in str(c.get("team",{}).get("id",""))), {})
             rows.append({
-                "Date":   e.get("date","")[:10],
-                "Home":   home.get("team",{}).get("abbreviation","?"),
-                "Away":   away.get("team",{}).get("abbreviation","?"),
-                "Score":  f"{home.get('score','?')}-{away.get('score','?')}",
-                "W/L":    result,
+                "Date":  e.get("date","")[:10],
+                "Home":  home.get("team",{}).get("abbreviation","?"),
+                "Away":  away.get("team",{}).get("abbreviation","?"),
+                "Score": f"{_score_str(home.get('score'))}-{_score_str(away.get('score'))}",
+                "W/L":   "W" if tc.get("winner") else "L",
             })
         return {"team": match["displayName"], "games": rows}
     except Exception:
@@ -643,20 +646,33 @@ def detect_entity_and_fetch_stats(market_title, category, sport_hint=""):
         if stats_a or stats_b:
             return {"type": "matchup", "sport": sport, "team_a": stats_a, "team_b": stats_b}
 
-    # ── Single entity (player or team) ─────────────────────────────────────────
-    words = market_title.split()
+    # ── Single entity: player or team ─────────────────────────────────────────
+    import re as _re_stat2
+
+    # Strip trailing stat tokens so "LeBron James 20+ Points?" → "LeBron James"
+    _clean_title = _re_stat2.sub(
+        r'\b(\d+\+?|\d+[-–]\d+|points?|rebounds?|assists?|goals?|saves?|hits?|'
+        r'yards?|touchdowns?|steals?|blocks?|shots?|over|under|scorer|winner|wins?)\b',
+        '', market_title, flags=_re_stat2.IGNORECASE
+    ).strip()
+
+    words = _clean_title.split()
     candidates = []
+    skip = {"Will","The","NBA","NFL","MLB","NHL","MLS","Who","What","How",
+            "When","Does","Can","Is","Are","First","Last","Next","Top","Total"}
     for i in range(len(words)-1):
         if words[i][0].isupper() and words[i+1][0].isupper():
-            candidates.append(f"{words[i]} {words[i+1]}")
-    if len(words) > 2:
-        for i in range(len(words)-2):
-            if words[i][0].isupper() and words[i+1][0].isupper() and words[i+2][0].isupper():
-                candidates.append(f"{words[i]} {words[i+1]} {words[i+2]}")
+            pair = f"{words[i]} {words[i+1]}"
+            if words[i] not in skip:
+                candidates.append(pair)
+    for i in range(len(words)-2):
+        if words[i][0].isupper() and words[i+1][0].isupper() and words[i+2][0].isupper():
+            triple = f"{words[i]} {words[i+1]} {words[i+2]}"
+            if words[i] not in skip:
+                candidates.append(triple)
 
-    skip = {"Will","The","NBA","NFL","MLB","NHL","Who","What","How","When","Does","Can","Is","Are"}
+    # Try player lookup — NBA first, then team lookup for non-NBA sports
     for candidate in candidates:
-        if candidate.split()[0] in skip: continue
         stats = fetch_nba_player_stats(candidate)
         if stats: return {"type": "player", "sport": sport, **stats}
 
@@ -1599,98 +1615,106 @@ Assess this market now."""
     except Exception as e:
         return {"_error": f"{type(e).__name__}: {e}"}
 
-def render_bet_curtain(bet, breakdown, sport_label):
-    """Render the quick-stats curtain shown below a bet row before deep research."""
-    cp        = bet["current_price"]
-    chg       = bet["price_change_pct"]
-    days      = bet.get("days_to_close")
-    snaps     = int(bet.get("snapshot_count", 1))
-    std       = bet.get("price_std", 0) or 0
-    es        = int(bet.get("edge_score", 0))
+def _mini_table_html(entity_stats, color):
+    """Render a compact last-5-games table for one player or team."""
+    if not entity_stats or not entity_stats.get("games"):
+        return ""
+    g    = entity_stats["games"]
+    name = entity_stats.get("team") or entity_stats.get("player", "")
+    keys = list(g[0].keys())[:5]
+    _th  = "padding:4px 8px;font-size:9px;color:#999ea6;border-bottom:1px solid #1e2530;text-align:left;letter-spacing:0.08em;text-transform:uppercase;"
+    _td  = "padding:5px 8px;font-size:11px;color:#c5cad3;border-bottom:1px solid rgba(30,37,48,0.5);"
+    hdrs = "".join(f"<th style='{_th}'>{h}</th>" for h in keys)
+    rows = "".join(
+        "<tr>" + "".join(f"<td style='{_td}'>{r.get(k,'-')}</td>" for k in keys) + "</tr>"
+        for r in g
+    )
+    return f"""
+<div style='margin-bottom:4px;'>
+  <div style='font-size:10px;color:{color};font-weight:700;letter-spacing:0.08em;
+    text-transform:uppercase;margin-bottom:6px;border-left:2px solid {color};
+    padding-left:8px;'>{name} · last {len(g)} games</div>
+  <table style='border-collapse:collapse;width:100%;'>
+    <thead><tr>{hdrs}</tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>"""
 
-    # ── Edge breakdown bars ───────────────────────────────────────────────────
-    max_abs   = max((abs(v) for v in breakdown.values()), default=1) or 1
-    bar_rows  = ""
+
+def render_edge_breakdown(breakdown, es):
+    """Render edge score breakdown as horizontal bar chart HTML."""
+    max_abs = max((abs(v) for v in breakdown.values()), default=1) or 1
+    bars = ""
     for label, val in breakdown.items():
         if val == 0:
             continue
-        color  = "#00C2A8" if val > 0 else "#DC2626"
-        pct    = min(abs(val) / max_abs * 100, 100)
-        sign   = f"+{val}" if val > 0 else str(val)
-        bar_rows += f"""
-<div style='display:flex;align-items:center;gap:8px;margin-bottom:5px;'>
-  <div style='width:110px;font-size:10px;color:#666;text-align:right;flex-shrink:0;'>{label}</div>
-  <div style='flex:1;background:#1c2028;border-radius:3px;height:6px;overflow:hidden;'>
-    <div style='height:6px;width:{pct:.0f}%;background:{color};border-radius:3px;'></div>
+        color = "#00C2A8" if val > 0 else "#DC2626"
+        pct   = min(abs(val) / max_abs * 100, 100)
+        sign  = f"+{val}" if val > 0 else str(val)
+        bars += f"""
+<div style='display:flex;align-items:center;gap:10px;margin-bottom:6px;'>
+  <div style='width:120px;font-size:10px;color:#636870;text-align:right;flex-shrink:0;
+    letter-spacing:0.06em;'>{label}</div>
+  <div style='flex:1;background:#1c2028;height:5px;overflow:hidden;'>
+    <div style='height:5px;width:{pct:.0f}%;background:{color};'></div>
   </div>
-  <div style='width:28px;font-size:10px;color:{color};font-weight:600;text-align:right;flex-shrink:0;'>{sign}</div>
+  <div style='width:32px;font-size:10px;color:{color};font-weight:700;
+    text-align:right;flex-shrink:0;'>{sign}</div>
+</div>"""
+    return f"""
+<div style='background:#0f1318;border:1px solid #1e2530;padding:14px 16px;margin:4px 0 8px 0;'>
+  <div style='font-size:9px;color:#636870;letter-spacing:0.14em;text-transform:uppercase;
+    margin-bottom:10px;'>// EDGE SCORE &nbsp;<span style='color:#eef2f9;font-size:13px;
+    font-weight:700;'>{es}</span></div>
+  {bars}
 </div>"""
 
-    # ── Team/player form ──────────────────────────────────────────────────────
-    stats     = detect_entity_and_fetch_stats(bet["event_ticker"], bet.get("category","Sports"), sport_hint=sport_label)
+
+def render_bet_curtain(bet, sport_label):
+    """Render recent form curtain (stats only — edge breakdown is separate)."""
+    cp    = bet["current_price"]
+    chg   = bet["price_change_pct"]
+    days  = bet.get("days_to_close")
+    snaps = int(bet.get("snapshot_count", 1))
+    std   = bet.get("price_std", 0) or 0
+
+    # ── Team / player recent form ─────────────────────────────────────────────
+    stats     = detect_entity_and_fetch_stats(
+        bet["event_ticker"], bet.get("category", "Sports"), sport_hint=sport_label
+    )
     form_html = ""
     if stats:
-        def _mini_table(team_stats, color):
-            if not team_stats or not team_stats.get("games"): return ""
-            g    = team_stats["games"]
-            name = team_stats.get("team") or team_stats.get("player","")
-            _td = "padding:3px 6px;font-size:11px;color:#c5cad3;border-bottom:1px solid #1e2530;"
-            rows = "".join(
-                f"<tr>{''.join(f'<td style=\"{_td}\">{v}</td>' for v in list(r.values())[:5])}</tr>"
-                for r in g
-            )
-            hdrs = "".join(
-                f"<th style='padding:3px 6px;font-size:9px;color:#999ea6;border-bottom:1px solid #1e2530;text-align:left;'>{h}</th>"
-                for h in list(g[0].keys())[:5]
-            )
-            return f"""<div>
-<div style='font-size:10px;color:{color};font-weight:600;letter-spacing:0.06em;margin-bottom:4px;'>{name}</div>
-<table style='border-collapse:collapse;width:100%;'>
-<thead><tr>{hdrs}</tr></thead>
-<tbody>{rows}</tbody></table></div>"""
-
         if stats.get("type") == "matchup":
-            ha = _mini_table(stats.get("team_a"), "#F59E0B")
-            hb = _mini_table(stats.get("team_b"), "#3B82F6")
+            ha = _mini_table_html(stats.get("team_a"), "#F59E0B")
+            hb = _mini_table_html(stats.get("team_b"), "#3B82F6")
             if ha or hb:
-                form_html = f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:4px;'>{ha}{hb}</div>"
+                form_html = f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:16px;'>{ha}{hb}</div>"
         elif stats.get("games"):
-            c = "#8B5CF6" if stats["type"] == "player" else "#3B82F6"
-            form_html = _mini_table(stats, c)
+            color = "#8B5CF6" if stats["type"] == "player" else "#3B82F6"
+            form_html = _mini_table_html(stats, color)
 
-    form_section = f"""
-<div style='border-top:1px solid #1e2530;padding-top:10px;margin-top:10px;'>
-  <div style='font-size:9px;color:#636870;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:8px;'>Recent Form</div>
-  {form_html if form_html else "<div style='font-size:11px;color:#2a2f38;'>No game stats available</div>"}
-</div>""" if stats else ""
-
-    # ── Market metadata row ───────────────────────────────────────────────────
-    days_str = f"{int(days)}d" if days is not None and not (isinstance(days, float) and days != days) else "—"
+    # ── Market metadata strip ─────────────────────────────────────────────────
+    days_str  = f"{int(days)}d" if days is not None and not (isinstance(days, float) and days != days) else "—"
     liq_lbl, liq_col = ("HIGH", "#00C2A8") if snaps >= 5 and std < 0.05 else \
                        ("MED",  "#F59E0B") if snaps >= 3 or std < 0.10 else \
                        ("LOW",  "#DC2626")
-    chg_col = "#00C2A8" if chg > 0 else "#DC2626"
-    meta_html = f"""
-<div style='border-top:1px solid #1e2530;padding-top:10px;margin-top:10px;
-  display:flex;gap:20px;font-size:11px;flex-wrap:wrap;'>
-  <span style='color:#999ea6;'>Closes in <b style='color:#c5cad3;'>{days_str}</b></span>
-  <span style='color:#999ea6;'>Price <b style='color:#eef2f9;'>{cp:.0%}</b></span>
-  <span style='color:#999ea6;'>Change <b style='color:{chg_col};'>{'+' if chg>0 else ''}{chg:.1f}%</b></span>
-  <span style='color:#999ea6;'>Volatility <b style='color:#c5cad3;'>{std*100:.1f}%σ</b></span>
-  <span style='color:#999ea6;'>Liquidity <b style='color:{liq_col};'>{liq_lbl}</b> <span style='color:#2a2f38;'>({snaps} snaps)</span></span>
-</div>"""
+    chg_col   = "#00C2A8" if chg > 0 else "#DC2626"
+
+    no_stats  = "<div style='font-size:11px;color:#4a5060;padding:8px 0;'>No stats available for this market</div>"
 
     return f"""
-<div style='background:#0f1318;border:1px solid #1e2530;border-radius:1px;
-  padding:14px 16px;margin:6px 0 10px 0;'>
-  <div style='display:grid;grid-template-columns:200px 1fr;gap:16px;align-items:start;'>
-    <div>
-      <div style='font-size:9px;color:#636870;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:8px;'>Edge Breakdown <span style='color:#999ea6;font-weight:700;'>{es}</span></div>
-      {bar_rows}
-    </div>
-    <div>{form_section if form_section else "<div style='font-size:11px;color:#2a2f38;padding-top:24px;'>No team stats found</div>"}</div>
+<div style='background:#0f1318;border:1px solid #1e2530;padding:14px 16px;margin:4px 0 8px 0;'>
+  <div style='font-size:9px;color:#636870;letter-spacing:0.14em;text-transform:uppercase;
+    margin-bottom:12px;'>// RECENT FORM</div>
+  {form_html if form_html else no_stats}
+  <div style='border-top:1px solid #1e2530;margin-top:12px;padding-top:10px;
+    display:flex;gap:20px;font-size:10px;flex-wrap:wrap;color:#636870;'>
+    <span>CLOSES &nbsp;<b style='color:#c5cad3;'>{days_str}</b></span>
+    <span>PRICE &nbsp;<b style='color:#eef2f9;'>{cp:.0%}</b></span>
+    <span>CHANGE &nbsp;<b style='color:{chg_col};'>{'+' if chg>0 else ''}{chg:.1f}%</b></span>
+    <span>VOL &nbsp;<b style='color:#c5cad3;'>{std*100:.1f}%σ</b></span>
+    <span>LIQ &nbsp;<b style='color:{liq_col};'>{liq_lbl}</b>&nbsp;<span style='color:#4a5060;'>({snaps} snaps)</span></span>
   </div>
-  {meta_html}
 </div>"""
 
 
@@ -2264,7 +2288,7 @@ with tab4:
                                 if src == "polymarket"
                                 else f"https://kalshi.com/markets/{str(bet['ticker']).split('-')[0].lower()}"
                             )
-                            _rc = st.columns([5, 1, 1, 1, 1, 1, 1])
+                            _rc = st.columns([5, 1, 1, 1, 1, 1, 1, 1])
                             _rc[0].markdown(
                                 f'<div style="font-size:13px;color:#c5cad3;padding:4px 0;">{title_txt}</div>',
                                 unsafe_allow_html=True
@@ -2278,15 +2302,13 @@ with tab4:
                                 unsafe_allow_html=True
                             )
                             _bd  = compute_edge_score_breakdown(bet, _cat_avg)
-                            _tip = "\n".join(
-                                f"{'+'if v>0 else ''}{v}  {k}"
-                                for k, v in _bd.items() if v != 0
-                            )
-                            _rc[3].markdown(
-                                f'<div style="font-size:12px;font-weight:700;color:{bec};padding:4px 0;" '
-                                f'title="{_tip}">{es}</div>',
-                                unsafe_allow_html=True
-                            )
+                            _ed_key = f"ed_{bet['ticker']}"
+                            _sc_key = f"sc_{bet['ticker']}"
+                            if _rc[3].button(
+                                f"{es}", key=f"edbtn_{bet['ticker']}",
+                                help="Edge score breakdown"
+                            ):
+                                st.session_state[_ed_key] = not st.session_state.get(_ed_key, False)
                             _rc[4].markdown(
                                 f'<a href="{bet_url}" target="_blank" style="font-size:9px;border:1px solid {_RED};'
                                 f'color:{_RED};padding:4px 8px;border-radius:1px;font-weight:700;letter-spacing:0.1em;'
@@ -2294,16 +2316,18 @@ with tab4:
                                 f'transition:all 0.15s ease;">BET →</a>',
                                 unsafe_allow_html=True
                             )
-                            _sc_key = f"sc_{bet['ticker']}"
-                            if _rc[5].button("📊", key=f"scbtn_{bet['ticker']}", help="Quick stats"):
+                            if _rc[5].button("📊", key=f"scbtn_{bet['ticker']}", help="Recent form"):
                                 st.session_state[_sc_key] = not st.session_state.get(_sc_key, False)
                             if _rc[6].button("🔬", key=f"dr_{bet['ticker']}", help="Deep research"):
                                 st.session_state["dr_ticker"] = bet["ticker"]
                                 st.session_state.pop("dr_ticker_result", None)
-                            # Stats curtain
+                            # Edge breakdown dropdown
+                            if st.session_state.get(_ed_key):
+                                st.markdown(render_edge_breakdown(_bd, es), unsafe_allow_html=True)
+                            # Stats curtain (form only)
                             if st.session_state.get(_sc_key):
                                 st.markdown(
-                                    render_bet_curtain(bet, _bd, _sport_lbl),
+                                    render_bet_curtain(bet, _sport_lbl),
                                     unsafe_allow_html=True
                                 )
                             # Render research card inline if this row's research is ready
