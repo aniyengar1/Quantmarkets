@@ -268,6 +268,7 @@ table tr:hover td {{ background: rgba(249,0,0,0.03); }}
     width: 0 !important;
     overflow: hidden !important;
 }}
+[data-testid="stExpander"] summary svg {{ display: none !important; }}
 [data-testid="stExpander"] summary::after {{
     content: '▾';
     font-size: 12px;
