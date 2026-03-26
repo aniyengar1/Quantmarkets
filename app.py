@@ -638,6 +638,54 @@ def _score_str(v):
         return v.get("displayValue") or str(int(v["value"])) if "value" in v else "?"
     return str(v) if v not in (None, "", "?") else "?"
 
+@st.cache_data(ttl=60)
+def fetch_espn_scoreboard(sport="nba"):
+    """Fetch today's live/completed scores from ESPN's scoreboard endpoint.
+    Returns dict keyed by frozenset of uppercase team abbreviations.
+    TTL=60s so live scores refresh every minute."""
+    sport_map = {
+        "nba": ("basketball", "nba"),
+        "nfl": ("football",   "nfl"),
+        "nhl": ("hockey",     "nhl"),
+        "mlb": ("baseball",   "mlb"),
+    }
+    s, league = sport_map.get(sport, ("basketball", "nba"))
+    try:
+        data = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/{s}/{league}/scoreboard",
+            timeout=8,
+        ).json()
+    except Exception:
+        return {}
+
+    result = {}
+    for event in data.get("events", []):
+        comp        = event.get("competitions", [{}])[0]
+        competitors = comp.get("competitors", [])
+        status      = comp.get("status", {})
+        state       = status.get("type", {}).get("state", "pre")  # "pre" | "in" | "post"
+
+        team_abbrs, scores = [], {}
+        for c in competitors:
+            abbr = c.get("team", {}).get("abbreviation", "").upper()
+            raw  = c.get("score", "")
+            if isinstance(raw, dict):
+                raw = raw.get("displayValue") or raw.get("value", "")
+            scores[abbr] = str(raw) if raw not in (None, "") else "0"
+            if abbr:
+                team_abbrs.append(abbr)
+
+        if len(team_abbrs) == 2:
+            t1, t2 = team_abbrs[0], team_abbrs[1]
+            result[frozenset([t1, t2])] = {
+                "state":       state,
+                "score_str":   f"{t1} {scores.get(t1,'0')}–{scores.get(t2,'0')} {t2}",
+                "period":      status.get("period", 0),
+                "clock":       status.get("displayClock", ""),
+                "description": status.get("type", {}).get("description", ""),
+            }
+    return result
+
 @st.cache_data(ttl=3600)
 def fetch_espn_team_stats(team_name, sport="nba"):
     """Fetch last 5 completed games for a team via ESPN unofficial endpoint."""
@@ -1825,12 +1873,35 @@ def render_edge_breakdown(breakdown, es):
   <div style='width:32px;font-size:10px;color:{color};font-weight:700;
     text-align:right;flex-shrink:0;'>{sign}</div>
 </div>"""
+    legend_rows = [
+        ("Base",              "+40 floor every active market starts with"),
+        ("Divergence",        "how far price drifted from open (max +25)"),
+        ("Drift vs category", "unusual move relative to category average (max +15)"),
+        ("Price zone",        "near 50% = uncertain = −8 · extremes &lt;25%/&gt;75% = +8"),
+        ("Signal keywords",   "ticker matches high-signal event patterns (+10)"),
+        ("Urgency",           "closing ≤7 days = +15 · ≤14 days = +8"),
+        ("Liquidity",         "snapshot count proxy: active = +5 · illiquid = −5"),
+    ]
+    legend_html = "".join(
+        f"<div style='display:flex;gap:8px;margin-bottom:5px;'>"
+        f"<span style='width:130px;color:#999ea6;flex-shrink:0;'>{k}</span>"
+        f"<span style='color:#4a5060;'>{v}</span></div>"
+        for k, v in legend_rows
+    )
     return f"""
 <div style='background:#0f1318;border:1px solid #1e2530;padding:14px 16px;margin:4px 0 8px 0;'>
   <div style='font-size:9px;color:#636870;letter-spacing:0.14em;text-transform:uppercase;
     margin-bottom:10px;'>// EDGE SCORE &nbsp;<span style='color:#eef2f9;font-size:13px;
     font-weight:700;'>{es}</span></div>
   {bars}
+  <details style='margin-top:10px;'>
+    <summary style='font-size:9px;color:#4a5060;letter-spacing:0.1em;text-transform:uppercase;
+      cursor:pointer;list-style:none;'>▸ what does this mean?</summary>
+    <div style='margin-top:8px;border-top:1px solid #1e2530;padding-top:8px;
+      font-size:10px;line-height:1.7;'>
+      {legend_html}
+    </div>
+  </details>
 </div>"""
 
 
@@ -2277,6 +2348,22 @@ with tab4:
 
         _MONTH_NUM = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
                       "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+        def _parse_game_key_teams(game_key):
+            """Extract team abbreviations from a Kalshi game key like '26APR18LALIND'.
+            Splits the trailing alpha string at its midpoint → frozenset({'LAL','IND'})."""
+            import re as _re_gk
+            m = _re_gk.match(
+                r'\d{2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}([A-Z]+)',
+                str(game_key).upper()
+            )
+            if not m:
+                return None
+            team_str = m.group(1)
+            mid = len(team_str) // 2
+            if mid < 2:
+                return None
+            return frozenset([team_str[:mid], team_str[mid:]])
+
         def parse_game_date(game_key):
             """Parse actual game date from Kalshi game_key (e.g. '26MAR25LALIND' → 2026-03-25).
             Kalshi NBA markets close ~14 days after game day, so close_time ≠ game date."""
@@ -2402,8 +2489,35 @@ with tab4:
 
                 # Use game date for urgency when available (Kalshi close_time is ~14d after game)
                 if pd.notna(days_to_game):
-                    badge     = (" 🟡 TODAY" if days_to_game == 0
-                                 else " 🟡 TOMORROW" if days_to_game == 1
+                    if days_to_game == 0:
+                        # Look up live/final score from ESPN scoreboard
+                        _gk_ticker  = grp.iloc[0]["ticker"].upper() if not grp.empty else ""
+                        _live_sport = ("nba" if "NBA" in _gk_ticker else
+                                       "nhl" if "NHL" in _gk_ticker else
+                                       "mlb" if "MLB" in _gk_ticker else
+                                       "nfl" if "NFL" in _gk_ticker else None)
+                        _live_info  = None
+                        if _live_sport:
+                            _board     = fetch_espn_scoreboard(_live_sport)
+                            _team_key  = _parse_game_key_teams(game_key)
+                            if _team_key:
+                                _live_info = _board.get(_team_key)
+
+                        if _live_info:
+                            _state = _live_info["state"]
+                            _score = _live_info["score_str"]
+                            if _state == "post":
+                                badge = f" ⚪ FINAL · {_score}"
+                            elif _state == "in":
+                                _plabels = {"nba": "Q", "nfl": "Q", "nhl": "P", "mlb": "Inn "}
+                                _pl = f"{_plabels.get(_live_sport,'P')}{_live_info['period']} {_live_info['clock']}".strip()
+                                badge = f" 🔴 LIVE · {_score} · {_pl}"
+                            else:
+                                badge = f" 🟡 TODAY · {_live_info['description']}"
+                        else:
+                            badge = " 🟡 TODAY"
+                    else:
+                        badge = (" 🟡 TOMORROW" if days_to_game == 1
                                  else " 🟡 THIS WEEK" if days_to_game <= 6
                                  else "")
                     auto_open = days_to_game == 0 or days_to_game == 1
