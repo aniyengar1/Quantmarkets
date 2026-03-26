@@ -490,28 +490,55 @@ def fetch_espn_team_stats(team_name, sport="nba"):
     except Exception:
         return None
 
-def detect_entity_and_fetch_stats(market_title, category):
-    """Given a market title, try to detect player/team and fetch relevant stats."""
+def detect_entity_and_fetch_stats(market_title, category, sport_hint=""):
+    """Given a market title, try to detect player/team and fetch relevant stats.
+    sport_hint: output of get_sport_label() — e.g. '🏀 NBA'. Used for reliable sport routing."""
     if category != "Sports": return None
     title_lower = market_title.lower()
 
-    # Detect sport type
-    if any(x in title_lower for x in ["nba","basketball","lakers","celtics","warriors","bulls","heat","nuggets","bucks"]):
+    # Detect sport — sport_hint from get_sport_label() is most reliable (uses Kalshi ticker prefix)
+    if "NBA" in sport_hint or any(x in title_lower for x in [
+        "nba","basketball",
+        "lakers","celtics","warriors","bulls","heat","nuggets","bucks","pistons","thunder",
+        "cavaliers","clippers","rockets","knicks","nets","hawks","magic","76ers","sixers",
+        "raptors","jazz","spurs","suns","kings","timberwolves","grizzlies","blazers",
+        "pelicans","hornets","pacers","wizards","mavericks","grizzlies",
+    ]):
         sport = "nba"
-    elif any(x in title_lower for x in ["nfl","football","chiefs","eagles","49ers","cowboys","patriots"]):
+    elif "NFL" in sport_hint or any(x in title_lower for x in [
+        "nfl","football","chiefs","eagles","49ers","cowboys","patriots","rams","ravens",
+        "broncos","packers","steelers","bears","giants","jets","dolphins","seahawks",
+    ]):
         sport = "nfl"
-    elif any(x in title_lower for x in ["mlb","baseball","yankees","dodgers","mets","cubs","red sox"]):
+    elif "MLB" in sport_hint or any(x in title_lower for x in [
+        "mlb","baseball","yankees","dodgers","mets","cubs","red sox","astros","braves",
+        "cardinals","giants","athletics","padres","phillies","twins","tigers","orioles",
+    ]):
         sport = "mlb"
-    elif any(x in title_lower for x in ["nhl","hockey","maple leafs","bruins","rangers","penguins"]):
+    elif "NHL" in sport_hint or any(x in title_lower for x in [
+        "nhl","hockey","maple leafs","bruins","rangers","penguins","lightning","capitals",
+        "oilers","avalanche","golden knights","hurricanes","flames","senators","canadiens",
+    ]):
         sport = "nhl"
     else:
         sport = "nba"  # default
 
-    # Try to extract a name — look for capitalized word sequences
-    import re
-    # Common player name patterns in market titles
+    import re as _re_stat
+
+    # ── Game matchup detection: "Team A at Team B Winner?" ─────────────────────
+    # Handles city-only names (Boston, Oklahoma City, Atlanta, Detroit) that
+    # wouldn't match single-team keyword lookups.
+    _at_m = _re_stat.search(r'^(.+?)\s+at\s+(.+?)(?:\s+(?:Winner|winner|Spread|Total)|\?|$)', market_title)
+    if _at_m:
+        team_a = _at_m.group(1).strip()
+        team_b = _at_m.group(2).strip()
+        stats_a = fetch_espn_team_stats(team_a, sport)
+        stats_b = fetch_espn_team_stats(team_b, sport)
+        if stats_a or stats_b:
+            return {"type": "matchup", "sport": sport, "team_a": stats_a, "team_b": stats_b}
+
+    # ── Single entity (player or team) ─────────────────────────────────────────
     words = market_title.split()
-    # Try pairs and triples of capitalized words
     candidates = []
     for i in range(len(words)-1):
         if words[i][0].isupper() and words[i+1][0].isupper():
@@ -521,24 +548,44 @@ def detect_entity_and_fetch_stats(market_title, category):
             if words[i][0].isupper() and words[i+1][0].isupper() and words[i+2][0].isupper():
                 candidates.append(f"{words[i]} {words[i+1]} {words[i+2]}")
 
-    # Try each candidate as a player first, then team
+    skip = {"Will","The","NBA","NFL","MLB","NHL","Who","What","How","When","Does","Can","Is","Are"}
     for candidate in candidates:
-        # Skip common non-name words
-        skip = {"Will","The","NBA","NFL","MLB","NHL","Who","What","How","When","Does","Can","Is","Are"}
         if candidate.split()[0] in skip: continue
         stats = fetch_nba_player_stats(candidate)
         if stats: return {"type": "player", "sport": sport, **stats}
 
-    # Try team
     for candidate in candidates:
         stats = fetch_espn_team_stats(candidate, sport)
         if stats: return {"type": "team", "sport": sport, **stats}
 
     return None
 
+def _single_stats_table_html(team_stats, color):
+    if not team_stats or not team_stats.get("games"): return ""
+    games = team_stats["games"]
+    headers = list(games[0].keys()) if games else []
+    title = f"{team_stats['team']} · Last {len(games)} games"
+    rows_html = "".join(
+        "<tr>" + "".join(f"<td style='padding:6px 10px;border-bottom:1px solid #1A1A1A;color:#CCC;font-size:12px;'>{g.get(h,'-')}</td>" for h in headers) + "</tr>"
+        for g in games
+    )
+    return f"""<div style='background:#111;border:1px solid #1E1E1E;border-left:3px solid {color};border-radius:6px;padding:12px 16px;margin-top:8px;font-family:monospace;'>
+<div style='font-size:10px;color:#666;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:8px;'>{title}</div>
+<table style='width:100%;border-collapse:collapse;'>
+<thead><tr>{"".join(f"<th style='padding:4px 10px;text-align:left;font-size:10px;color:#555;letter-spacing:0.06em;border-bottom:1px solid #222;'>{h}</th>" for h in headers)}</tr></thead>
+<tbody>{rows_html}</tbody></table></div>"""
+
 def render_stats_card(stats):
     """Render a compact stats card as HTML."""
     if not stats: return ""
+
+    # Matchup: two teams side by side
+    if stats.get("type") == "matchup":
+        html_a = _single_stats_table_html(stats.get("team_a"), "#F59E0B")
+        html_b = _single_stats_table_html(stats.get("team_b"), "#3B82F6")
+        if not html_a and not html_b: return ""
+        return f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;'>{html_a}{html_b}</div>"
+
     games = stats.get("games", [])
     if not games: return ""
 
@@ -1340,7 +1387,7 @@ def fetch_news(query, max_articles=5):
         return []
 
 @st.cache_data(ttl=3600)
-def generate_market_research(market_title, current_price, category, edge_score, price_change_pct, news_headlines, today_date="", player_stats_summary=""):
+def generate_market_research(market_title, current_price, category, edge_score, price_change_pct, news_headlines, today_date="", player_stats_summary="", sport_label=""):
     """Call Claude Sonnet to generate a sharp market research card."""
     if not ANTHROPIC_API_KEY:
         return None
@@ -1382,11 +1429,12 @@ Return ONLY valid JSON, no markdown, no explanation:
   "narrative_flag_reason": "<one sentence if flag is true, else empty string>"
 }"""
 
-    stats_block = f"\nRecent player/team stats:\n{player_stats_summary}" if player_stats_summary else ""
+    stats_block = f"\nRecent team/player stats (use as primary form indicator):\n{player_stats_summary}" if player_stats_summary else ""
+    sport_block = f"\nSport: {sport_label}" if sport_label else ""
 
     prompt = f"""Market: {market_title}
 Current probability: {current_price:.1%}
-Category: {category}
+Category: {category}{sport_block}
 Edge score: {edge_score}/100
 Price change: {price_change_pct:+.1f}% since tracking began
 Today's date: {today_date or "March 2026"}
@@ -2076,18 +2124,33 @@ with tab4:
                 st.markdown("---")
                 st.markdown(f"### 🔬 Deep Research: {_dr_row['event_ticker']}")
                 with st.spinner("Fetching news and generating analysis..."):
-                    _dr_news_q  = build_news_query(_dr_row["event_ticker"], _dr_row["category"])
-                    _dr_news    = fetch_news(_dr_news_q, max_articles=5)
-                    _dr_stats   = detect_entity_and_fetch_stats(_dr_row["event_ticker"], _dr_row["category"])
-                    _dr_st_txt  = ""
-                    if _dr_stats and _dr_stats.get("games"):
-                        _g = _dr_stats["games"]
-                        if _dr_stats["type"] == "player":
-                            _dr_st_txt = (f"{_dr_stats['player']} ({_dr_stats.get('team','')}) last {len(_g)} games: " +
-                                          ", ".join([f"{x['Date']}: {x['PTS']}pts/{x['REB']}reb/{x['AST']}ast" for x in _g]))
-                        else:
-                            _dr_st_txt = (f"{_dr_stats['team']} last {len(_g)} games: " +
-                                          ", ".join([f"{x['Date']}: {x.get('Score','?')} ({x.get('W/L','?')})" for x in _g]))
+                    _dr_sport_lbl = get_sport_label(_dr_row.get("ticker",""), _dr_row["event_ticker"])
+                    _dr_news_q    = build_news_query(_dr_row["event_ticker"], _dr_row["category"])
+                    _dr_news      = fetch_news(_dr_news_q, max_articles=5)
+                    _dr_stats     = detect_entity_and_fetch_stats(
+                        _dr_row["event_ticker"], _dr_row["category"], sport_hint=_dr_sport_lbl
+                    )
+                    _dr_st_txt = ""
+                    if _dr_stats:
+                        if _dr_stats.get("type") == "matchup":
+                            _parts = []
+                            for _side_key in ("team_a", "team_b"):
+                                _side = _dr_stats.get(_side_key)
+                                if _side and _side.get("games"):
+                                    _g = _side["games"]
+                                    _parts.append(
+                                        f"{_side['team']} last {len(_g)} games: " +
+                                        ", ".join([f"{x['Date']}: {x.get('Score','?')} ({x.get('W/L','?')})" for x in _g])
+                                    )
+                            _dr_st_txt = " | ".join(_parts)
+                        elif _dr_stats.get("games"):
+                            _g = _dr_stats["games"]
+                            if _dr_stats["type"] == "player":
+                                _dr_st_txt = (f"{_dr_stats['player']} ({_dr_stats.get('team','')}) last {len(_g)} games: " +
+                                              ", ".join([f"{x['Date']}: {x['PTS']}pts/{x['REB']}reb/{x['AST']}ast" for x in _g]))
+                            else:
+                                _dr_st_txt = (f"{_dr_stats['team']} last {len(_g)} games: " +
+                                              ", ".join([f"{x['Date']}: {x.get('Score','?')} ({x.get('W/L','?')})" for x in _g]))
                     import datetime as _dt2
                     _dr_research = generate_market_research(
                         market_title=_dr_row["event_ticker"], current_price=_dr_row["current_price"],
@@ -2095,6 +2158,7 @@ with tab4:
                         price_change_pct=_dr_row["price_change_pct"], news_headlines=_dr_news,
                         today_date=_dt2.date.today().strftime("%B %d, %Y"),
                         player_stats_summary=_dr_st_txt,
+                        sport_label=_dr_sport_lbl,
                     )
                 if _dr_research and _dr_research.get("_error"):
                     st.error(f"⚠️ AI verdict failed: {_dr_research['_error']}")
