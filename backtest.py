@@ -25,7 +25,7 @@ def get_series_ticker(market_ticker):
 
 def plot_results(df):
     fig, axes = plt.subplots(1, 3, figsize=(14, 5))
-    fig.suptitle("QuantMarkets — Kalshi Backtest Results", fontsize=14, fontweight="bold")
+    fig.suptitle("Callibr — Kalshi Backtest Results", fontsize=14, fontweight="bold")
 
     # Chart 1: PnL by probability bucket
     bucket_pnl = df.groupby("prob_bucket")["pnl"].sum()

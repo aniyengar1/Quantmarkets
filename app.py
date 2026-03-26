@@ -638,10 +638,27 @@ def _score_str(v):
         return v.get("displayValue") or str(int(v["value"])) if "value" in v else "?"
     return str(v) if v not in (None, "", "?") else "?"
 
+def _espn_to_kalshi_abbr(abbr):
+    """Normalise ESPN abbreviations to match Kalshi's ticker team codes.
+    ESPN sometimes uses shorter/different codes than what Kalshi encodes."""
+    return {
+        "SA":   "SAS",   # Spurs: ESPN "SA" → Kalshi "SAS"
+        "GS":   "GSW",   # Warriors: ESPN "GS" → Kalshi "GSW"
+        "UTAH": "UTA",   # Jazz: ESPN "UTAH" → Kalshi "UTA"
+        "WSH":  "WAS",   # Wizards: ESPN "WSH" → Kalshi "WAS"
+        "NO":   "NOP",   # Pelicans: ESPN "NO" → Kalshi "NOP"
+        "NY":   "NYK",   # Knicks: ESPN "NY" → Kalshi "NYK"
+        "NJ":   "BKN",   # (old Nets code)
+    }.get(abbr, abbr)
+
+def _scoreboard_key(a, b):
+    """Canonical string key for a pair of team abbreviations (order-independent)."""
+    return "|".join(sorted([a, b]))
+
 @st.cache_data(ttl=60)
 def fetch_espn_scoreboard(sport="nba"):
     """Fetch today's live/completed scores from ESPN's scoreboard endpoint.
-    Returns dict keyed by frozenset of uppercase team abbreviations.
+    Returns dict keyed by sorted 'ABBR1|ABBR2' strings (Kalshi-normalised).
     TTL=60s so live scores refresh every minute."""
     sport_map = {
         "nba": ("basketball", "nba"),
@@ -667,8 +684,9 @@ def fetch_espn_scoreboard(sport="nba"):
 
         team_abbrs, scores = [], {}
         for c in competitors:
-            abbr = c.get("team", {}).get("abbreviation", "").upper()
-            raw  = c.get("score", "")
+            raw_abbr = c.get("team", {}).get("abbreviation", "").upper()
+            abbr     = _espn_to_kalshi_abbr(raw_abbr)
+            raw      = c.get("score", "")
             if isinstance(raw, dict):
                 raw = raw.get("displayValue") or raw.get("value", "")
             scores[abbr] = str(raw) if raw not in (None, "") else "0"
@@ -677,7 +695,8 @@ def fetch_espn_scoreboard(sport="nba"):
 
         if len(team_abbrs) == 2:
             t1, t2 = team_abbrs[0], team_abbrs[1]
-            result[frozenset([t1, t2])] = {
+            key = _scoreboard_key(t1, t2)
+            result[key] = {
                 "state":       state,
                 "score_str":   f"{t1} {scores.get(t1,'0')}–{scores.get(t2,'0')} {t2}",
                 "period":      status.get("period", 0),
@@ -2279,6 +2298,110 @@ with tab4:
             df_res[_is_mention].assign(_gk=_gk_tmp[_is_mention]).drop_duplicates(subset=["_gk"], keep="first").drop(columns=["_gk"], errors="ignore")
         ]).sort_values(["_sort_days", "edge_score"], ascending=[True, False]).reset_index(drop=True)
 
+    # ── live now dashboard (default view, no active search) ───────────────────
+    if not search_query.strip():
+        import datetime as _dt_live
+
+        st.markdown(
+            '<div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;'
+            'color:#f90000;font-weight:700;margin:24px 0 16px 0;">📡 &nbsp;Live Now</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── sports live scores ─────────────────────────────────────────────
+        _live_sports = [
+            ("nba", ("basketball", "nba"), "🏀 NBA"),
+            ("nhl", ("hockey",     "nhl"), "🏒 NHL"),
+            ("mlb", ("baseball",   "mlb"), "⚾ MLB"),
+        ]
+        _any_live_game = False
+        for _ls_key, _, _ls_label in _live_sports:
+            _board = fetch_espn_scoreboard(_ls_key)
+            if not _board:
+                continue
+            _live_games   = [(k, v) for k, v in _board.items() if v["state"] == "in"]
+            _final_games  = [(k, v) for k, v in _board.items() if v["state"] == "post"]
+            _pre_games    = [(k, v) for k, v in _board.items() if v["state"] == "pre"]
+            _today_games  = _live_games + _final_games + _pre_games
+            if not _today_games:
+                continue
+            _any_live_game = True
+            _period_label = {"nba": "Q", "nfl": "Q", "nhl": "P", "mlb": "Inn "}
+            st.markdown(
+                f'<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;'
+                f'color:#4a5060;margin:14px 0 8px 0;">{_ls_label}</div>',
+                unsafe_allow_html=True,
+            )
+            _score_cols = st.columns(min(len(_today_games), 4))
+            for _ci, (_, _gi) in enumerate(_today_games[:4]):
+                with _score_cols[_ci]:
+                    _s = _gi["state"]
+                    if _s == "in":
+                        _pl = f"{_period_label.get(_ls_key,'P')}{_gi['period']} {_gi['clock']}".strip()
+                        _dot = '<span style="color:#f90000;font-size:8px;">●</span> '
+                        _status_line = f"{_dot}<span style='color:#f90000;font-size:10px;'>{_pl}</span>"
+                    elif _s == "post":
+                        _dot = '<span style="color:#4a5060;font-size:8px;">●</span> '
+                        _status_line = f"{_dot}<span style='color:#4a5060;font-size:10px;'>FINAL</span>"
+                    else:
+                        _dot = '<span style="color:#F59E0B;font-size:8px;">●</span> '
+                        _status_line = f"{_dot}<span style='color:#F59E0B;font-size:10px;'>{_gi['description']}</span>"
+                    st.markdown(
+                        f'<div style="background:#14181e;border:1px solid #1e2530;border-radius:2px;'
+                        f'padding:12px 14px;font-size:13px;font-weight:600;line-height:1.5;">'
+                        f'{_gi["score_str"]}<br>'
+                        f'<span style="font-size:10px;font-weight:400;">{_status_line}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        if not _any_live_game:
+            st.markdown(
+                '<div style="font-size:11px;color:#4a5060;padding:8px 0;">No games scheduled today.</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown('<div style="margin-top:24px;"></div>', unsafe_allow_html=True)
+
+        # ── market pulse per category ──────────────────────────────────────
+        _PULSE_CATS = [
+            ("Politics & Macro", "🏛"),
+            ("Crypto",           "₿"),
+            ("Tech & Markets",   "📈"),
+            ("Entertainment & Legal", "🎬"),
+        ]
+        _cat_avg_live = df_markets.groupby("category")["price_change_pct"].mean().to_dict()
+        _pulse_cols = st.columns(len(_PULSE_CATS))
+        for _pi, (_pcat, _picon) in enumerate(_PULSE_CATS):
+            with _pulse_cols[_pi]:
+                _pdf = df_markets[df_markets["category"] == _pcat].copy()
+                if _pdf.empty:
+                    continue
+                _pdf["_es"] = _pdf.apply(lambda r: compute_edge_score(r, _cat_avg_live), axis=1)
+                _pdf = _pdf.sort_values("_es", ascending=False).head(4)
+                st.markdown(
+                    f'<div style="font-size:9px;letter-spacing:0.14em;text-transform:uppercase;'
+                    f'color:#4a5060;margin-bottom:8px;">{_picon} {_pcat}</div>',
+                    unsafe_allow_html=True,
+                )
+                for _, _pr in _pdf.iterrows():
+                    _chg = _pr["price_change_pct"]
+                    _chg_col = "#00C2A8" if _chg > 0 else "#DC2626" if _chg < 0 else "#4a5060"
+                    _chg_str = f"+{_chg:.1f}%" if _chg > 0 else f"{_chg:.1f}%"
+                    _title_short = _pr["event_ticker"][:42] + "…" if len(_pr["event_ticker"]) > 42 else _pr["event_ticker"]
+                    st.markdown(
+                        f'<div style="background:#14181e;border:1px solid #1e2530;border-radius:2px;'
+                        f'padding:10px 12px;margin-bottom:6px;">'
+                        f'<div style="font-size:11px;color:#eef2f9;line-height:1.4;margin-bottom:4px;">{_title_short}</div>'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;">'
+                        f'<span style="font-size:13px;font-weight:700;">{_pr["current_price"]:.0%}</span>'
+                        f'<span style="font-size:10px;color:{_chg_col};">{_chg_str}</span>'
+                        f'</div></div>',
+                        unsafe_allow_html=True,
+                    )
+
+        st.markdown('<div style="border-top:1px solid #1e2530;margin:28px 0 20px 0;"></div>', unsafe_allow_html=True)
+
     # ── summary bar ───────────────────────────────────────────────────────────
     if not df_res.empty:
         sb1, sb2, sb3, sb4 = st.columns(4)
@@ -2350,7 +2473,8 @@ with tab4:
                       "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
         def _parse_game_key_teams(game_key):
             """Extract team abbreviations from a Kalshi game key like '26APR18LALIND'.
-            Splits the trailing alpha string at its midpoint → frozenset({'LAL','IND'})."""
+            Splits the trailing alpha string at its midpoint and returns a canonical
+            'ABBR1|ABBR2' string (alphabetically sorted) matching fetch_espn_scoreboard keys."""
             import re as _re_gk
             m = _re_gk.match(
                 r'\d{2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}([A-Z]+)',
@@ -2362,7 +2486,7 @@ with tab4:
             mid = len(team_str) // 2
             if mid < 2:
                 return None
-            return frozenset([team_str[:mid], team_str[mid:]])
+            return _scoreboard_key(team_str[:mid], team_str[mid:])
 
         def parse_game_date(game_key):
             """Parse actual game date from Kalshi game_key (e.g. '26MAR25LALIND' → 2026-03-25).
@@ -2498,8 +2622,8 @@ with tab4:
                                        "nfl" if "NFL" in _gk_ticker else None)
                         _live_info  = None
                         if _live_sport:
-                            _board     = fetch_espn_scoreboard(_live_sport)
-                            _team_key  = _parse_game_key_teams(game_key)
+                            _board    = fetch_espn_scoreboard(_live_sport)
+                            _team_key = _parse_game_key_teams(game_key)  # "ABBR1|ABBR2" or None
                             if _team_key:
                                 _live_info = _board.get(_team_key)
 

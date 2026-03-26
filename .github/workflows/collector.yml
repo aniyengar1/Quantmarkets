@@ -32,3 +32,6 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python collector.py
+
+      - name: Ping Streamlit app (keepalive)
+        run: curl -s -o /dev/null -w "%{http_code}" https://getcallibr.streamlit.app || true
