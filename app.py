@@ -262,6 +262,25 @@ table tr:hover td {{ background: rgba(249,0,0,0.03); }}
     z-index: 9999;
 }}
 
+/* ── fix expander arrow (font override breaks Streamlit's icon font) ── */
+.arrow_down, .arrow_up, [class*="arrow_down"], [class*="arrow_up"] {{
+    font-size: 0 !important;
+    width: 0 !important;
+    overflow: hidden !important;
+}}
+[data-testid="stExpander"] summary::after {{
+    content: '▾';
+    font-size: 12px;
+    color: var(--t3);
+    margin-left: 6px;
+    font-family: monospace !important;
+    transition: transform 0.15s ease;
+}}
+[data-testid="stExpander"] details[open] summary::after {{
+    content: '▴';
+    color: var(--t2);
+}}
+
 /* ── hide Streamlit chrome ── */
 #MainMenu, footer {{ visibility: hidden !important; }}
 [data-testid="stToolbar"] {{ display: none !important; }}
