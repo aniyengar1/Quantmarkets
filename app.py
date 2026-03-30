@@ -1549,61 +1549,6 @@ with tab2:
     source_panel(lc, df_poly_markets,   "🟣 Polymarket",    SOURCE_COLORS["polymarket"])
     source_panel(rc, df_kalshi_markets, "🔵 Kalshi (live)", SOURCE_COLORS["kalshi"])
 
-    # ── Cross-exchange arbitrage detection ────────────────────────────────────
-    st.markdown("---")
-    st.markdown("### ⚡ Cross-Exchange Opportunities")
-    st.caption("Same event priced differently on Polymarket vs Kalshi. Larger gap = bigger potential edge.")
-
-    import re as _re_arb
-
-    def _normalise(title):
-        """Lowercase, strip punctuation and common boilerplate for fuzzy matching."""
-        t = title.lower()
-        t = _re_arb.sub(r'[^a-z0-9 ]', ' ', t)
-        stops = {"will","the","a","an","in","of","to","by","for","at","on","is","are",
-                 "does","do","who","what","when","win","wins","winner","be"}
-        return " ".join(w for w in t.split() if w not in stops and len(w) > 1)
-
-    _poly_k   = df_poly_markets.copy()
-    _kals_k   = df_kalshi_markets.copy()
-    _poly_k["_norm"] = _poly_k["event_ticker"].apply(_normalise)
-    _kals_k["_norm"] = _kals_k["event_ticker"].apply(_normalise)
-
-    # Keep only the most recent price per ticker on each exchange
-    _poly_k = _poly_k.sort_values("current_price").drop_duplicates("_norm", keep="last")
-    _kals_k = _kals_k.sort_values("current_price").drop_duplicates("_norm", keep="last")
-
-    # Exact normalised-title match
-    _arb = _poly_k.merge(_kals_k, on="_norm", suffixes=("_poly","_kals"))
-    if not _arb.empty:
-        _arb["poly_price"]  = _arb["current_price_poly"]
-        _arb["kals_price"]  = _arb["current_price_kals"]
-        _arb["gap"]         = (_arb["poly_price"] - _arb["kals_price"]).abs()
-        _arb["direction"]   = _arb.apply(
-            lambda r: f"🟣 Poly higher by {r['gap']:.0%}" if r["poly_price"] > r["kals_price"]
-                      else f"🔵 Kalshi higher by {r['gap']:.0%}", axis=1
-        )
-        _arb = _arb[_arb["gap"] >= 0.03].sort_values("gap", ascending=False)
-
-        if not _arb.empty:
-            _arb_disp = _arb[["event_ticker_poly","poly_price","kals_price","gap","direction"]].copy()
-            _arb_disp.columns = ["Market","Poly %","Kalshi %","Gap","Direction"]
-            st.dataframe(
-                _arb_disp.reset_index(drop=True), use_container_width=True,
-                column_config={
-                    "Poly %":   st.column_config.NumberColumn(format="%.0f%%", min_value=0, max_value=1),
-                    "Kalshi %": st.column_config.NumberColumn(format="%.0f%%", min_value=0, max_value=1),
-                    "Gap":      st.column_config.NumberColumn("Gap", format="%.0f%%"),
-                }
-            )
-            st.download_button(
-                "⬇ Download CSV", _arb_disp.to_csv(index=False).encode(),
-                file_name="callibr_arb.csv", mime="text/csv", key="dl_arb"
-            )
-        else:
-            st.info("No cross-exchange gaps ≥3% found right now.")
-    else:
-        st.info("No exact title matches found across exchanges. Markets may be titled differently.")
 
 
 
@@ -2884,3 +2829,4 @@ with tab4:
             st.info(f"No markets found for '{search_query}'. Try a broader term.")
         else:
             st.info("Enter a search term above to find markets, or browse by category.")
+
