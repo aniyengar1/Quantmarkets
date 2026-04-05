@@ -26,7 +26,7 @@ _PURP  = "#8B5CF6"   # polymarket
 # ── custom CSS ────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;800&family=Geist+Mono:wght@300;400;500;600;700&display=swap');
 
 :root {{
   --bg0:    {_BG0};
@@ -42,7 +42,8 @@ st.markdown(f"""
   --amber:  {_AMBER};
   --blue:   {_BLUE};
   --purp:   {_PURP};
-  --font:   'Geist Mono', 'Courier New', monospace;
+  --font:      'Geist', 'Inter', sans-serif;
+  --font-mono: 'Geist Mono', 'Courier New', monospace;
 }}
 
 /* ── global ── */
@@ -198,7 +199,7 @@ p.arrow_down, p.arrow_up,
     font-size: 11px;
     color: var(--t3);
     margin-left: 6px;
-    font-family: monospace !important;
+    font-family: var(--font-mono) !important;
     float: right;
 }}
 [data-testid="stExpander"] details[open] > summary::after {{
@@ -782,15 +783,24 @@ def fetch_espn_team_stats(team_name, sport="nba"):
     """Fetch last 5 completed games for a team via ESPN unofficial endpoint."""
     try:
         sport_map = {
-            "nba":    ("basketball", "nba"),
-            "nfl":    ("football",   "nfl"),
-            "mlb":    ("baseball",   "mlb"),
-            "nhl":    ("hockey",     "nhl"),
-            "soccer": ("soccer",     "usa.1"),
+            "nba":        ("basketball", "nba"),
+            "nfl":        ("football",   "nfl"),
+            "mlb":        ("baseball",   "mlb"),
+            "nhl":        ("hockey",     "nhl"),
+            "epl":        ("soccer",     "eng.1"),
+            "ucl":        ("soccer",     "UEFA.CHAMPIONS_LEAGUE"),
+            "mls":        ("soccer",     "usa.1"),
+            "laliga":     ("soccer",     "esp.1"),
+            "bundesliga": ("soccer",     "ger.1"),
+            "seriea":     ("soccer",     "ita.1"),
+            "ligue1":     ("soccer",     "fra.1"),
+            "ncaab":      ("basketball", "mens-college-basketball"),
+            "ncaaf":      ("football",   "college-football"),
         }
         s, league = sport_map.get(sport, ("basketball", "nba"))
+        limit = 500 if sport in ("ncaab", "ncaaf") else 100
         r = requests.get(
-            f"https://site.api.espn.com/apis/site/v2/sports/{s}/{league}/teams?limit=100",
+            f"https://site.api.espn.com/apis/site/v2/sports/{s}/{league}/teams?limit={limit}",
             timeout=8
         ).json()
         teams = r.get("sports",[{}])[0].get("leagues",[{}])[0].get("teams",[])
@@ -859,6 +869,131 @@ def fetch_espn_injuries(sport="nba"):
     except Exception:
         return []
 
+@st.cache_data(ttl=3600)
+def fetch_espn_tennis_player(player_name):
+    """Fetch ranking and record for a tennis player via ESPN (ATP/WTA)."""
+    for tour in ("atp", "wta"):
+        try:
+            r = requests.get(
+                f"https://site.api.espn.com/apis/site/v2/sports/tennis/{tour}/athletes"
+                f"?search={player_name.replace(' ','%20')}&limit=5",
+                timeout=8
+            ).json()
+            athletes = r.get("athletes", [])
+            if not athletes:
+                continue
+            a = athletes[0]
+            rank = "?"
+            if a.get("rankings"):
+                rank = a["rankings"][0].get("current", "?")
+            record = a.get("record", {}).get("summary", "") or a.get("displayRecord", "")
+            return {
+                "type": "tennis", "sport": "tennis",
+                "player": a.get("displayName", player_name),
+                "tour": tour.upper(), "rank": rank, "record": record,
+                "games": [],  # no game rows — rendered separately
+            }
+        except Exception:
+            continue
+    return None
+
+@st.cache_data(ttl=1800)
+def fetch_espn_golf_leaderboard():
+    """Fetch current PGA Tour leaderboard from ESPN."""
+    try:
+        r = requests.get(
+            "https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard",
+            timeout=8
+        ).json()
+        events = r.get("events", [])
+        if not events:
+            return None
+        event = events[0]
+        tournament = event.get("name", "PGA Tour")
+        competitors = event.get("competitions", [{}])[0].get("competitors", [])[:10]
+        rows = []
+        for c in competitors:
+            stats = {s.get("name",""): s.get("displayValue","") for s in c.get("statistics",[])}
+            rows.append({
+                "Pos":    c.get("status", {}).get("position", {}).get("displayText", ""),
+                "Player": c.get("athlete", {}).get("displayName", ""),
+                "Score":  stats.get("scoreToPar", stats.get("totalScore", "")),
+                "Thru":   stats.get("holesPlayed", ""),
+            })
+        return {"type": "golf", "sport": "golf", "team": tournament, "games": rows}
+    except Exception:
+        return None
+
+@st.cache_data(ttl=3600)
+def fetch_espn_mma_athlete(fighter_name):
+    """Fetch UFC/MMA fighter record from ESPN."""
+    try:
+        r = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/mma/ufc/athletes"
+            f"?search={fighter_name.replace(' ','%20')}&limit=5",
+            timeout=8
+        ).json()
+        athletes = r.get("athletes", [])
+        if not athletes:
+            return None
+        a = athletes[0]
+        record = a.get("displayRecord","") or a.get("record",{}).get("summary","")
+        return {
+            "type": "mma", "sport": "mma",
+            "player": a.get("displayName", fighter_name),
+            "team": a.get("weightClass",""),
+            "record": record,
+            "games": [],
+        }
+    except Exception:
+        return None
+
+@st.cache_data(ttl=3600)
+def fetch_f1_latest_race():
+    """Fetch last F1 race results + driver standings via Jolpica/Ergast API."""
+    try:
+        results_r = requests.get(
+            "https://api.jolpi.ca/ergast/f1/current/last/results.json",
+            timeout=10
+        ).json()
+        races = results_r.get("MRData",{}).get("RaceTable",{}).get("Races",[])
+        rows = []
+        race_name = "F1"
+        if races:
+            race = races[0]
+            race_name = race.get("raceName","F1")
+            for res in race.get("Results",[])[:5]:
+                rows.append({
+                    "Pos":    res.get("position",""),
+                    "Driver": f"{res['Driver']['givenName']} {res['Driver']['familyName']}",
+                    "Team":   res.get("Constructor",{}).get("name",""),
+                    "Time":   res.get("Time",{}).get("time","") or res.get("status",""),
+                })
+        # Standings for championship context
+        standings_r = requests.get(
+            "https://api.jolpi.ca/ergast/f1/current/driverStandings.json",
+            timeout=10
+        ).json()
+        sl = (standings_r.get("MRData",{}).get("StandingsTable",{})
+              .get("StandingsLists",[{}])[0].get("DriverStandings",[]))
+        standings_rows = [
+            {
+                "Pos":    s.get("position",""),
+                "Driver": f"{s['Driver']['givenName']} {s['Driver']['familyName']}",
+                "Team":   s.get("Constructors",[{}])[0].get("name","") if s.get("Constructors") else "",
+                "Pts":    s.get("points",""),
+            }
+            for s in sl[:5]
+        ]
+        return {
+            "type": "f1", "sport": "f1",
+            "team": race_name,
+            "games": rows,
+            "standings": standings_rows,
+        }
+    except Exception:
+        return None
+
 def _format_injuries_for_prompt(injuries, teams_involved=None):
     """Format injury list as a compact string for Claude prompt injection.
     If teams_involved is a list of team name fragments, only include matching players."""
@@ -883,46 +1018,151 @@ def detect_entity_and_fetch_stats(market_title, category, sport_hint=""):
     if category != "Sports": return None
     title_lower = market_title.lower()
 
-    # Detect sport — sport_hint from get_sport_label() is most reliable (uses Kalshi ticker prefix)
+    # ── Sport routing (hint-first, then keyword fallback) ─────────────────────
     if "NBA" in sport_hint or any(x in title_lower for x in [
-        "nba","basketball",
-        "lakers","celtics","warriors","bulls","heat","nuggets","bucks","pistons","thunder",
+        "nba","lakers","celtics","warriors","bulls","heat","nuggets","bucks","pistons","thunder",
         "cavaliers","clippers","rockets","knicks","nets","hawks","magic","76ers","sixers",
         "raptors","jazz","spurs","suns","kings","timberwolves","grizzlies","blazers",
-        "pelicans","hornets","pacers","wizards","mavericks","grizzlies",
+        "pelicans","hornets","pacers","wizards","mavericks",
     ]):
         sport = "nba"
+
     elif "NFL" in sport_hint or any(x in title_lower for x in [
-        "nfl","football","chiefs","eagles","49ers","cowboys","patriots","rams","ravens",
+        "nfl","chiefs","eagles","49ers","cowboys","patriots","rams","ravens",
         "broncos","packers","steelers","bears","giants","jets","dolphins","seahawks",
+        "lions","falcons","panthers","saints","buccaneers","cardinals","chargers","raiders",
+        "colts","texans","jaguars","titans","bengals","browns",
     ]):
         sport = "nfl"
+
     elif "MLB" in sport_hint or any(x in title_lower for x in [
         "mlb","baseball","yankees","dodgers","mets","cubs","red sox","astros","braves",
         "cardinals","giants","athletics","padres","phillies","twins","tigers","orioles",
+        "blue jays","rays","royals","white sox","mariners","rangers","angels","reds","pirates",
+        "rockies","marlins","nationals","guardians","brewers",
     ]):
         sport = "mlb"
+
     elif "NHL" in sport_hint or any(x in title_lower for x in [
         "nhl","hockey","maple leafs","bruins","rangers","penguins","lightning","capitals",
         "oilers","avalanche","golden knights","hurricanes","flames","senators","canadiens",
+        "islanders","devils","flyers","sabres","red wings","blue jackets","wild","sharks",
+        "ducks","coyotes","stars","blues","jets","predators","kraken",
     ]):
         sport = "nhl"
+
     elif "IPL" in sport_hint or "Cricket" in sport_hint or any(x in title_lower for x in [
         "ipl","cricket","mumbai indians","chennai super kings","royal challengers",
         "kolkata knight riders","sunrisers","delhi capitals","rajasthan royals",
-        "punjab kings","lucknow super giants","gujarat titans",
+        "punjab kings","lucknow super giants","gujarat titans","test match","t20","odi",
     ]):
-        # ESPN has no IPL/cricket data — skip stats lookup entirely,
-        # rely on news + Claude reasoning only
+        return None  # ESPN has no cricket data — news + Claude only
+
+    elif "F1" in sport_hint or any(x in title_lower for x in [
+        "formula 1","formula one","f1 ","grand prix","verstappen","hamilton","leclerc",
+        "norris","sainz","alonso","perez","russell","piastri","driver championship",
+        "constructor championship","monaco gp","silverstone","monza",
+    ]):
+        return fetch_f1_latest_race()
+
+    elif any(x in sport_hint for x in ["MMA","UFC","Boxing"]) or any(x in title_lower for x in [
+        "ufc","mma","fight night","bellator","pfl","boxing","knockout","heavyweight",
+        "lightweight","welterweight","middleweight","featherweight",
+    ]):
+        import re as _re_mma
+        fighters = _re_mma.findall(r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', market_title)
+        for f in fighters:
+            result = fetch_espn_mma_athlete(f)
+            if result:
+                return result
         return None
+
+    elif any(x in sport_hint for x in ["ATP","WTA"]) or any(x in title_lower for x in [
+        "atp","wta","tennis","wimbledon","us open tennis","french open","australian open",
+        "roland garros","alcaraz","sinner","djokovic","federer","nadal","swiatek","sabalenka",
+        "medvedev","zverev","rybakina","gauff","jabeur",
+    ]):
+        import re as _re_ten
+        players = _re_ten.findall(r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', market_title)
+        for p in players:
+            result = fetch_espn_tennis_player(p)
+            if result:
+                return result
+        return None
+
+    elif any(x in title_lower for x in [
+        "pga tour","lpga","masters","the open championship","us open golf","ryder cup",
+        "golf","scheffler","mcilroy","woods","rahm","koepka","thomas","spieth",
+    ]):
+        return fetch_espn_golf_leaderboard()
+
+    elif "EPL" in sport_hint or any(x in title_lower for x in [
+        "premier league","epl","chelsea","arsenal","manchester city","manchester united",
+        "liverpool","tottenham","aston villa","newcastle","brighton","west ham","everton",
+        "fulham","brentford","crystal palace","wolves","nottm forest","luton","sheffield",
+    ]):
+        sport = "epl"
+
+    elif "UCL" in sport_hint or "Champions League" in sport_hint or any(x in title_lower for x in [
+        "champions league","ucl","europa league","real madrid","barcelona","bayern munich",
+        "psg","paris saint","juventus","inter milan","atletico madrid","porto","celtic","ajax",
+        "borussia dortmund","rb leipzig","napoli",
+    ]):
+        sport = "ucl"
+
+    elif "MLS" in sport_hint or any(x in title_lower for x in [
+        "mls","major league soccer","inter miami","la galaxy","seattle sounders",
+        "portland timbers","atlanta united","new york city fc","new england revolution",
+        "toronto fc","chicago fire","colorado rapids","fc dallas","houston dynamo",
+    ]):
+        sport = "mls"
+
+    elif "La Liga" in sport_hint or any(x in title_lower for x in [
+        "la liga","laliga","sevilla","atletico","valencia","villarreal","real betis",
+        "athletic bilbao","real sociedad","osasuna","getafe","girona",
+    ]):
+        sport = "laliga"
+
+    elif "Bundesliga" in sport_hint or any(x in title_lower for x in [
+        "bundesliga","bayer leverkusen","eintracht frankfurt","freiburg","werder bremen",
+        "hoffenheim","augsburg","wolfsburg","mainz","union berlin",
+    ]):
+        sport = "bundesliga"
+
+    elif "Serie A" in sport_hint or any(x in title_lower for x in [
+        "serie a","ac milan","lazio","roma","atalanta","fiorentina","torino","monza","udinese",
+    ]):
+        sport = "seriea"
+
+    elif "Ligue 1" in sport_hint or any(x in title_lower for x in [
+        "ligue 1","ligue1","marseille","lyon","monaco","lens","lille","rennes","nice","strasbourg",
+    ]):
+        sport = "ligue1"
+
+    elif "NCAAB" in sport_hint or any(x in title_lower for x in [
+        "ncaab","march madness","college basketball","duke","kentucky","kansas",
+        "gonzaga","villanova","north carolina","michigan state","indiana","purdue",
+    ]):
+        sport = "ncaab"
+
+    elif "NCAAF" in sport_hint or any(x in title_lower for x in [
+        "ncaaf","college football","cfb playoff","alabama","ohio state","georgia",
+        "michigan","clemson","notre dame","oklahoma","lsu","texas","florida","penn state",
+    ]):
+        sport = "ncaaf"
+
+    elif any(x in title_lower for x in ["cs2","esports","counter-strike","call of duty","league of legends","dota","valorant","overwatch"]):
+        return None  # news-only
+
+    elif any(x in title_lower for x in ["cba","chinese basketball"]):
+        return None  # news-only
+
     else:
-        sport = "nba"  # default
+        return None  # don't default to wrong sport
 
     import re as _re_stat
 
     # ── Game matchup detection: "Team A at Team B Winner?" ─────────────────────
-    # Handles city-only names (Boston, Oklahoma City, Atlanta, Detroit) that
-    # wouldn't match single-team keyword lookups.
     _at_m = _re_stat.search(r'^(.+?)\s+at\s+(.+?)(?:\s+(?:Winner|winner|Spread|Total)|\?|$)', market_title)
     if _at_m:
         team_a = _at_m.group(1).strip()
@@ -934,8 +1174,6 @@ def detect_entity_and_fetch_stats(market_title, category, sport_hint=""):
 
     # ── Single entity: player or team ─────────────────────────────────────────
     import re as _re_stat2
-
-    # Strip trailing stat tokens so "LeBron James 20+ Points?" → "LeBron James"
     _clean_title = _re_stat2.sub(
         r'\b(\d+\+?|\d+[-–]\d+|points?|rebounds?|assists?|goals?|saves?|hits?|'
         r'yards?|touchdowns?|steals?|blocks?|shots?|over|under|scorer|winner|wins?)\b',
@@ -945,22 +1183,24 @@ def detect_entity_and_fetch_stats(market_title, category, sport_hint=""):
     words = _clean_title.split()
     candidates = []
     skip = {"Will","The","NBA","NFL","MLB","NHL","MLS","Who","What","How",
-            "When","Does","Can","Is","Are","First","Last","Next","Top","Total"}
+            "When","Does","Can","Is","Are","First","Last","Next","Top","Total","EPL","UCL"}
     for i in range(len(words)-1):
-        if words[i][0].isupper() and words[i+1][0].isupper():
+        if words[i] and words[i+1] and words[i][0].isupper() and words[i+1][0].isupper():
             pair = f"{words[i]} {words[i+1]}"
             if words[i] not in skip:
                 candidates.append(pair)
     for i in range(len(words)-2):
-        if words[i][0].isupper() and words[i+1][0].isupper() and words[i+2][0].isupper():
+        if (words[i] and words[i+1] and words[i+2] and
+                words[i][0].isupper() and words[i+1][0].isupper() and words[i+2][0].isupper()):
             triple = f"{words[i]} {words[i+1]} {words[i+2]}"
             if words[i] not in skip:
                 candidates.append(triple)
 
-    # Try player lookup — NBA first, then team lookup for non-NBA sports
-    for candidate in candidates:
-        stats = fetch_nba_player_stats(candidate)
-        if stats: return {"type": "player", "sport": sport, **stats}
+    # NBA: try player lookup first via balldontlie
+    if sport == "nba":
+        for candidate in candidates:
+            stats = fetch_nba_player_stats(candidate)
+            if stats: return {"type": "player", "sport": sport, **stats}
 
     for candidate in candidates:
         stats = fetch_espn_team_stats(candidate, sport)
@@ -983,6 +1223,21 @@ def _single_stats_table_html(team_stats, color):
 <thead><tr>{"".join(f"<th style='padding:4px 10px;text-align:left;font-size:10px;color:#999ea6;letter-spacing:0.06em;border-bottom:1px solid #1e2530;'>{h}</th>" for h in headers)}</tr></thead>
 <tbody>{rows_html}</tbody></table></div>"""
 
+def _table_html(rows, title, color, headers=None):
+    """Render a compact table card as HTML."""
+    if not rows: return ""
+    _h = headers or list(rows[0].keys())
+    rows_html = "".join(
+        "<tr>" + "".join(f"<td style='padding:6px 10px;border-bottom:1px solid #1e2530;color:#c5cad3;font-size:12px;'>{g.get(h,'-')}</td>" for h in _h) + "</tr>"
+        for g in rows
+    )
+    return (f"<div style='background:#14181e;border:1px solid #1e2530;border-left:3px solid {color};"
+            f"border-radius:1px;padding:12px 16px;margin-top:8px;font-family:\"Geist Mono\",\"Courier New\",monospace;'>"
+            f"<div style='font-size:10px;color:#666;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:8px;'>{title}</div>"
+            f"<table style='width:100%;border-collapse:collapse;'>"
+            f"<thead><tr>{''.join(f'<th style=\"padding:4px 10px;text-align:left;font-size:10px;color:#999ea6;letter-spacing:0.06em;border-bottom:1px solid #1e2530;\">{h}</th>' for h in _h)}</tr></thead>"
+            f"<tbody>{rows_html}</tbody></table></div>")
+
 def render_stats_card(stats):
     """Render a compact stats card as HTML."""
     if not stats: return ""
@@ -994,30 +1249,61 @@ def render_stats_card(stats):
         if not html_a and not html_b: return ""
         return f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;'>{html_a}{html_b}</div>"
 
+    # Tennis: rank + record badge (no game rows)
+    if stats.get("type") == "tennis":
+        name   = stats.get("player","")
+        tour   = stats.get("tour","")
+        rank   = stats.get("rank","?")
+        record = stats.get("record","")
+        return (f"<div style='background:#14181e;border:1px solid #1e2530;border-left:3px solid #6366F1;"
+                f"border-radius:1px;padding:12px 16px;margin-top:8px;'>"
+                f"<div style='font-size:10px;color:#666;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px;'>🎾 {tour} · {name}</div>"
+                f"<span style='font-size:13px;color:#c5cad3;'>World Rank <b style=\"color:#6366F1\">#{rank}</b>"
+                + (f"  ·  Record <b style=\"color:#c5cad3\">{record}</b>" if record else "")
+                + "</span></div>")
+
+    # MMA/Boxing: record badge
+    if stats.get("type") == "mma":
+        name   = stats.get("player","")
+        wclass = stats.get("team","")
+        record = stats.get("record","")
+        return (f"<div style='background:#14181e;border:1px solid #1e2530;border-left:3px solid #EF4444;"
+                f"border-radius:1px;padding:12px 16px;margin-top:8px;'>"
+                f"<div style='font-size:10px;color:#666;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px;'>🥊 MMA · {name}</div>"
+                f"<span style='font-size:13px;color:#c5cad3;'>"
+                + (f"{wclass}  ·  " if wclass else "")
+                + (f"Record <b style=\"color:#EF4444\">{record}</b>" if record else "No record found")
+                + "</span></div>")
+
+    # F1: last race results + standings
+    if stats.get("type") == "f1":
+        html = ""
+        if stats.get("games"):
+            html += _table_html(stats["games"], f"🏎 {stats.get('team','F1')} — Top 5 Results", "#F59E0B")
+        if stats.get("standings"):
+            html += _table_html(stats["standings"], "🏆 Driver Standings", "#3B82F6")
+        return html
+
+    # Golf leaderboard (games rows have Pos/Player/Score/Thru)
+    if stats.get("type") == "golf":
+        games = stats.get("games", [])
+        if not games: return ""
+        return _table_html(games, f"⛳ {stats.get('team','PGA Tour')} — Leaderboard", "#10B981")
+
+    # Standard table (team recent form or player stats)
     games = stats.get("games", [])
     if not games: return ""
 
-    if stats["type"] == "player":
+    if stats.get("type") == "player":
         headers = ["Date","PTS","REB","AST","MIN"]
-        title = f"{stats['player']} — {stats.get('team','')} · Last {len(games)} games"
+        title = f"{stats.get('player','')} — {stats.get('team','')} · Last {len(games)} games"
         color = "#8B5CF6"
     else:
-        headers = list(games[0].keys()) if games else []
-        title = f"{stats['team']} · Last {len(games)} games"
+        headers = list(games[0].keys())
+        title = f"{stats.get('team','')} · Last {len(games)} games"
         color = "#3B82F6"
 
-    rows_html = ""
-    for g in games:
-        rows_html += "<tr>" + "".join(f"<td style='padding:6px 10px;border-bottom:1px solid #1e2530;color:#c5cad3;font-size:12px;'>{g.get(h,'-')}</td>" for h in headers) + "</tr>"
-
-    return f"""
-<div style='background:#14181e;border:1px solid #1e2530;border-left:3px solid {color};border-radius:1px;padding:12px 16px;margin-top:8px;font-family:'Geist Mono','Courier New',monospace;'>
-<div style='font-size:10px;color:#666;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:8px;'>{title}</div>
-<table style='width:100%;border-collapse:collapse;'>
-<thead><tr>{"".join(f"<th style='padding:4px 10px;text-align:left;font-size:10px;color:#999ea6;letter-spacing:0.06em;border-bottom:1px solid #1e2530;'>{h}</th>" for h in headers)}</tr></thead>
-<tbody>{rows_html}</tbody>
-</table>
-</div>"""
+    return _table_html(games, title, color, headers)
 
 # ── load + split data ─────────────────────────────────────────────────────────
 try:
@@ -1852,6 +2138,86 @@ def enrich_title_with_context(title, ticker, close_time):
 # Micro-market title patterns that are in-game noise, not research targets
 # Novelty/micro-market patterns that score 0 — not useful for research
 
+# ── Category-specific news sources ───────────────────────────────────────────
+# RSS feeds: authoritative outlets, no API key, parsed with stdlib
+_CATEGORY_RSS = {
+    "Politics & Macro": [
+        "https://feeds.bbci.co.uk/news/politics/rss.xml",           # BBC Politics
+        "https://feeds.bbci.co.uk/news/world/rss.xml",              # BBC World
+        "https://moxie.foxnews.com/google-publisher/politics.xml",  # Fox News Politics
+        "https://rss.politico.com/politics-news.xml",               # Politico
+        "https://thehill.com/feed/",                                # The Hill
+        "https://feeds.apnews.com/apnews/politics",                 # AP Politics
+    ],
+    "Crypto": [
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",          # CoinDesk
+        "https://cointelegraph.com/rss",                            # CoinTelegraph
+        "https://decrypt.co/feed",                                  # Decrypt
+        "https://feeds.bbci.co.uk/news/business/rss.xml",           # BBC Business
+    ],
+    "Tech & Markets": [
+        "https://techcrunch.com/feed/",                             # TechCrunch
+        "https://www.theverge.com/rss/index.xml",                   # The Verge
+        "https://feeds.bbci.co.uk/news/technology/rss.xml",         # BBC Tech
+        "https://www.cnbc.com/id/100003114/device/rss/rss.html",    # CNBC Top
+    ],
+    "Entertainment & Legal": [
+        "https://deadline.com/feed/",                               # Deadline
+        "https://variety.com/feed/",                                # Variety
+        "https://www.hollywoodreporter.com/feed/",                  # THR
+        "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml",  # BBC Ent
+    ],
+}
+
+# NewsAPI source IDs: filtered queries per category (comma-separated)
+_CATEGORY_NEWSAPI_SOURCES = {
+    "Politics & Macro":      "bbc-news,fox-news,reuters,associated-press,politico,the-hill,cnn,abc-news,nbc-news,msnbc,al-jazeera-english,the-washington-post",
+    "Crypto":                "the-next-web,crypto-coins-news,techcrunch,reuters,bloomberg",
+    "Tech & Markets":        "techcrunch,the-verge,wired,ars-technica,bloomberg,business-insider,cnbc,reuters,the-wall-street-journal,fortune",
+    "Entertainment & Legal": "entertainment-weekly,buzzfeed,the-guardian,bbc-news,mtv-news",
+}
+
+@st.cache_data(ttl=600)
+def fetch_rss_feed(url, max_items=4):
+    """Parse an RSS/Atom feed and return article dicts matching fetch_news() shape.
+    Uses only Python stdlib — no new packages required."""
+    import urllib.request as _ul, xml.etree.ElementTree as _ET
+    import email.utils as _eu, datetime as _dtt
+    try:
+        req = _ul.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; Callibr/1.0)"})
+        with _ul.urlopen(req, timeout=6) as resp:
+            content = resp.read()
+        root = _ET.fromstring(content)
+        _ns  = {"atom": "http://www.w3.org/2005/Atom"}
+        items = (root.findall(".//item") or
+                 root.findall(".//atom:entry", _ns) or
+                 root.findall(".//entry"))
+        source_name = (url.split("//")[-1].split("/")[0]
+                       .replace("www.","").replace("feeds.","").replace("moxie.",""))
+        articles = []
+        for item in items[:max_items]:
+            def _txt(tag, ns=None):
+                el = item.find(tag, ns) if ns else item.find(tag)
+                return (el.text or "").strip() if el is not None else ""
+            title = _txt("title") or _txt("atom:title", _ns)
+            desc  = _txt("description") or _txt("summary") or _txt("atom:summary", _ns)
+            pub   = _txt("pubDate") or _txt("published") or _txt("atom:published", _ns)
+            link  = _txt("link") or _txt("atom:link", _ns)
+            if not title or "[Removed]" in title:
+                continue
+            pub_date = ""
+            if pub:
+                try:    pub_date = _dtt.datetime(*_eu.parsedate(pub[:30])[:6]).strftime("%Y-%m-%d")
+                except: pub_date = pub[:10]
+            articles.append({
+                "title": title, "source": source_name,
+                "published": pub_date, "url": link,
+                "description": desc[:200] if desc else "",
+            })
+        return articles
+    except Exception:
+        return []
+
 def build_news_query(market_title, category):
     """Build a tight, specific NewsAPI query from a market title."""
     # Strip prediction market boilerplate
@@ -1866,11 +2232,11 @@ def build_news_query(market_title, category):
 
     # Category-specific boosters
     boosters = {
-        "Politics & Macro": ["election","policy","congress","senate"],
-        "Sports": ["game","stats","injury","trade","ipl","cricket"],
-        "Crypto": ["price","market","regulation"],
-        "Tech & Markets": ["earnings","stock","announcement"],
-        "Entertainment & Legal": ["trial","verdict","release"],
+        "Politics & Macro":      ["vote","bill","election","senate","congress","fed","tariff","policy"],
+        "Sports":                ["injury","trade","ipl","cricket","odds","preview"],
+        "Crypto":                ["bitcoin","price","SEC","ETF","regulation","blockchain"],
+        "Tech & Markets":        ["earnings","CEO","layoffs","acquisition","IPO","stock","AI"],
+        "Entertainment & Legal": ["verdict","guilty","trial","release","award","box office","lawsuit"],
     }
     # Don't add booster if already in query
     boost = [b for b in boosters.get(category, []) if b not in " ".join(query_words).lower()]
@@ -1879,20 +2245,25 @@ def build_news_query(market_title, category):
     return " ".join(query_words)
 
 @st.cache_data(ttl=600)  # 10-min cache — breaking news surfaces faster
-def fetch_news(query, max_articles=5):
-    """Fetch recent news articles via NewsAPI."""
+def fetch_news(query, max_articles=5, sources=""):
+    """Fetch recent news articles via NewsAPI.
+    sources: optional comma-separated NewsAPI source IDs to filter results."""
     if not NEWSAPI_KEY:
         return []
     try:
+        params = {
+            "q":       query,
+            "sortBy":  "publishedAt",
+            "pageSize": max_articles,
+            "apiKey":  NEWSAPI_KEY,
+        }
+        if sources:
+            params["sources"] = sources  # 'language' param not allowed when sources= is set
+        else:
+            params["language"] = "en"
         r = requests.get(
             "https://newsapi.org/v2/everything",
-            params={
-                "q": query,
-                "sortBy": "publishedAt",
-                "language": "en",
-                "pageSize": max_articles,
-                "apiKey": NEWSAPI_KEY,
-            },
+            params=params,
             timeout=8,
         )
         data = r.json()
@@ -1911,21 +2282,70 @@ def fetch_news(query, max_articles=5):
     except Exception:
         return []
 
-def fetch_multi_news(market_title, category, player=None, teams=None):
-    """Run 2-3 targeted NewsAPI queries and return up to 12 deduplicated articles.
-    Covers: title-based query + player injury search + matchup preview."""
+def fetch_multi_news(market_title, category, player=None, teams=None, sport_hint=""):
+    """Run up to 4 targeted NewsAPI queries and return up to 12 deduplicated articles.
+    Covers: title-based query + player/team specifics + sport-specific supplemental."""
     queries = [build_news_query(market_title, category)]
     if player:
         queries.append(f"{player} injury status update")
     if teams and len(teams) >= 2:
         queries.append(f"{teams[0]} {teams[1]} preview")
+
+    # Sport-specific supplemental query
+    if category == "Sports" and sport_hint:
+        sport_q = None
+        t0 = teams[0] if teams else ""
+        t1 = teams[1] if teams and len(teams) > 1 else ""
+        if "NBA" in sport_hint:
+            sport_q = f"{t0} NBA injury report" if t0 else None
+        elif "NFL" in sport_hint:
+            sport_q = f"{t0} NFL injury report week" if t0 else None
+        elif "MLB" in sport_hint:
+            sport_q = f"{t0} {t1} starting pitcher lineup".strip() if t0 else None
+        elif "NHL" in sport_hint:
+            sport_q = f"{t0} {t1} NHL game preview".strip() if t0 else None
+        elif any(x in sport_hint for x in ["EPL","UCL","MLS","La Liga","Bundesliga","Serie A","Ligue 1"]):
+            sport_q = (f"{t0} {t1} form lineup tactics".strip() if t1
+                       else f"{t0} soccer form injuries" if t0 else None)
+        elif "IPL" in sport_hint or "Cricket" in sport_hint:
+            sport_q = (f"{t0} {t1} playing XI toss result".strip() if t1
+                       else f"IPL match preview {market_title[:35]}")
+        elif any(x in sport_hint for x in ["ATP","WTA"]):
+            sport_q = (f"{player} tennis head-to-head match preview" if player
+                       else f"{t0} tennis form ranking" if t0 else None)
+        elif "F1" in sport_hint or "Formula" in sport_hint:
+            sport_q = "Formula 1 race qualifying results standings"
+        elif any(x in sport_hint for x in ["UFC","MMA","Boxing"]):
+            sport_q = (f"{player} UFC fight weigh-in odds preview" if player
+                       else f"{t0} MMA fight preview" if t0 else None)
+        elif "Golf" in sport_hint or "PGA" in sport_hint:
+            sport_q = "PGA Tour leaderboard round score cut"
+        elif "NCAAB" in sport_hint:
+            sport_q = f"NCAA basketball {market_title[:35]} odds prediction"
+        elif "NCAAF" in sport_hint:
+            sport_q = f"college football {market_title[:35]} odds prediction"
+        if sport_q and sport_q not in queries:
+            queries.append(sport_q)
+
+    cat_sources = _CATEGORY_NEWSAPI_SOURCES.get(category, "")
     seen, articles = set(), []
+
+    # Layer 1: RSS feeds — authoritative outlets, no key needed, runs first
+    if category in _CATEGORY_RSS:
+        for url in _CATEGORY_RSS[category][:4]:
+            for a in fetch_rss_feed(url, max_items=3):
+                if a["title"] not in seen:
+                    seen.add(a["title"])
+                    articles.append(a)
+
+    # Layer 2: NewsAPI — source-filtered queries
     for q in queries:
-        for a in fetch_news(q, max_articles=6):
+        for a in fetch_news(q, max_articles=6, sources=cat_sources):
             if a["title"] not in seen:
                 seen.add(a["title"])
                 articles.append(a)
-    return articles[:12]
+
+    return articles[:15]
 
 @st.cache_data(ttl=3600)
 def generate_market_research(market_title, current_price, category, edge_score,
@@ -2003,7 +2423,7 @@ Price change: {price_change_pct:+.1f}% since tracking began
 Today's date: {today}
 {injury_block}{cross_block}{vegas_block}
 {stats_block}
-Recent news (most recent first):
+Recent news from authoritative sources (BBC, Fox News, Politico, AP, CoinDesk, CoinTelegraph, TechCrunch, The Verge, Deadline, Variety, Reuters, CNBC, etc.):
 {news_block}
 
 Assess this market now. Remember: rely only on the provided context, not your training knowledge of recent events."""
@@ -2151,6 +2571,17 @@ def render_bet_curtain(bet, sport_label):
             hb = _mini_table_html(stats.get("team_b"), "#3B82F6")
             if ha or hb:
                 form_html = f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:16px;'>{ha}{hb}</div>"
+        elif stats.get("type") == "tennis":
+            form_html = (f"<div style='font-size:12px;color:#c5cad3;padding:4px 0;'>🎾 "
+                         f"{stats.get('player','')} · {stats.get('tour','')} Rank <b style='color:#6366F1'>#{stats.get('rank','?')}</b>"
+                         + (f" · {stats.get('record','')}" if stats.get('record') else "") + "</div>")
+        elif stats.get("type") == "mma":
+            form_html = (f"<div style='font-size:12px;color:#c5cad3;padding:4px 0;'>🥊 "
+                         f"{stats.get('player','')} · Record <b style='color:#EF4444'>{stats.get('record','')}</b></div>")
+        elif stats.get("type") == "f1":
+            form_html = render_stats_card(stats)
+        elif stats.get("type") == "golf":
+            form_html = render_stats_card(stats)
         elif stats.get("games"):
             color = "#8B5CF6" if stats["type"] == "player" else "#3B82F6"
             form_html = _mini_table_html(stats, color)
@@ -3083,9 +3514,10 @@ with tab4:
                 st.markdown(f"### 🔬 Deep Research: {_dr_row['event_ticker']}")
                 with st.spinner("Fetching live data and generating analysis..."):
                     _dr_sport_lbl = get_sport_label(_dr_row.get("ticker",""), _dr_row["event_ticker"])
-                    # Detect sport for injury fetch
-                    _dr_sport_key = "nba"
-                    if "NFL" in _dr_sport_lbl:  _dr_sport_key = "nfl"
+                    # Detect sport for ESPN injury fetch (only NBA/NFL/NHL/MLB supported)
+                    _dr_sport_key = None
+                    if "NBA" in _dr_sport_lbl:   _dr_sport_key = "nba"
+                    elif "NFL" in _dr_sport_lbl: _dr_sport_key = "nfl"
                     elif "NHL" in _dr_sport_lbl: _dr_sport_key = "nhl"
                     elif "MLB" in _dr_sport_lbl: _dr_sport_key = "mlb"
 
@@ -3094,45 +3526,69 @@ with tab4:
                         _dr_row["event_ticker"], _dr_row["category"], sport_hint=_dr_sport_lbl
                     )
 
-                    # Build player/team context
+                    # Build player/team context for Claude prompt
                     _dr_player = None
                     _dr_teams  = []
                     _dr_st_txt = ""
                     if _dr_stats:
-                        if _dr_stats.get("type") == "matchup":
+                        _st = _dr_stats
+                        if _st.get("type") == "matchup":
                             _parts = []
                             for _side_key in ("team_a", "team_b"):
-                                _side = _dr_stats.get(_side_key)
+                                _side = _st.get(_side_key)
                                 if _side:
                                     _dr_teams.append(_side.get("team",""))
                                     if _side.get("games"):
                                         _g = _side["games"]
                                         _parts.append(
                                             f"{_side['team']} last {len(_g)} games: " +
-                                            ", ".join([f"{x['Date']}: {x.get('Score','?')} ({x.get('W/L','?')})" for x in _g])
+                                            ", ".join([f"{x.get('Date','')}: {x.get('Score','?')} ({x.get('W/L','?')})" for x in _g])
                                         )
                             _dr_st_txt = " | ".join(_parts)
-                        elif _dr_stats.get("games"):
-                            _g = _dr_stats["games"]
-                            if _dr_stats.get("type") == "player":
-                                _dr_player = _dr_stats.get("player")
-                                _dr_st_txt = (f"{_dr_player} ({_dr_stats.get('team','')}) last {len(_g)} games: " +
-                                              ", ".join([f"{x['Date']}: {x['PTS']}pts/{x['REB']}reb/{x['AST']}ast" for x in _g]))
+                        elif _st.get("type") == "tennis":
+                            _dr_player = _st.get("player")
+                            _dr_st_txt = (f"{_dr_player} ({_st.get('tour','')}) — "
+                                          f"Rank #{_st.get('rank','?')}, Record {_st.get('record','')}")
+                        elif _st.get("type") == "mma":
+                            _dr_player = _st.get("player")
+                            _dr_st_txt = (f"{_dr_player} ({_st.get('team','')}) — "
+                                          f"Record {_st.get('record','')}")
+                        elif _st.get("type") == "f1":
+                            parts = []
+                            if _st.get("games"):
+                                _g = _st["games"]
+                                parts.append(f"Last race ({_st.get('team','')}): " +
+                                             ", ".join([f"{x.get('Pos','')}. {x.get('Driver','')} ({x.get('Team','')})" for x in _g]))
+                            if _st.get("standings"):
+                                parts.append("Standings: " +
+                                             ", ".join([f"{x.get('Pos','')}. {x.get('Driver','')} {x.get('Pts','')}pts" for x in _st["standings"][:3]]))
+                            _dr_st_txt = " | ".join(parts)
+                        elif _st.get("type") == "golf":
+                            if _st.get("games"):
+                                _dr_st_txt = (f"{_st.get('team','PGA Tour')} leaderboard: " +
+                                              ", ".join([f"{x.get('Pos','')} {x.get('Player','')} ({x.get('Score','')})" for x in _st["games"][:5]]))
+                        elif _st.get("games"):
+                            _g = _st["games"]
+                            if _st.get("type") == "player":
+                                _dr_player = _st.get("player")
+                                _dr_st_txt = (f"{_dr_player} ({_st.get('team','')}) last {len(_g)} games: " +
+                                              ", ".join([f"{x.get('Date','')}: {x.get('PTS','?')}pts/{x.get('REB','?')}reb/{x.get('AST','?')}ast" for x in _g]))
                             else:
-                                _dr_teams.append(_dr_stats.get("team",""))
-                                _dr_st_txt = (f"{_dr_stats['team']} last {len(_g)} games: " +
-                                              ", ".join([f"{x['Date']}: {x.get('Score','?')} ({x.get('W/L','?')})" for x in _g]))
+                                _dr_teams.append(_st.get("team",""))
+                                _dr_st_txt = (f"{_st.get('team','')} last {len(_g)} games: " +
+                                              ", ".join([f"{x.get('Date','')}: {x.get('Score','?')} ({x.get('W/L','?')})" for x in _g]))
 
                     # Multi-query news — up to 12 articles
                     _dr_news = fetch_multi_news(
                         _dr_row["event_ticker"], _dr_row["category"],
                         player=_dr_player,
                         teams=_dr_teams if _dr_teams else None,
+                        sport_hint=_dr_sport_lbl,
                     )
 
-                    # Injury report (sports markets only)
+                    # Injury report (ESPN only supports NBA/NFL/NHL/MLB)
                     _dr_injury_str = ""
-                    if _dr_row.get("category") == "Sports":
+                    if _dr_row.get("category") == "Sports" and _dr_sport_key:
                         _dr_injuries = fetch_espn_injuries(_dr_sport_key)
                         _dr_injury_str = _format_injuries_for_prompt(
                             _dr_injuries,
