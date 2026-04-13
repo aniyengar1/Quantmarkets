@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import requests
 import json
 from supabase import create_client
+from backtest_tab import render_backtest_tab
 
 st.set_page_config(page_title="Callibr", page_icon="🎯", layout="wide")
 
@@ -372,8 +373,45 @@ NEWSAPI_KEY       = st.secrets.get("NEWSAPI_KEY", "")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ── waitlist gate ─────────────────────────────────────────────────────────────
+def _verify_and_admit(email: str) -> str | None:
+    """Check Supabase. Returns None on success (sets session_state), error string on failure."""
+    _e = (email or "").strip().lower()
+    if not _e or "@" not in _e:
+        return "Please enter a valid email address."
+    try:
+        _res = (supabase.table("waitlist")
+                .select("email, approved")
+                .eq("email", _e)
+                .execute())
+        if not _res.data:
+            return "Email not found. Join the waitlist at getcallibr.app first."
+        if not _res.data[0]["approved"]:
+            return "Your access is pending approval. We'll reach out when you're in."
+        st.session_state["user_email"] = _e
+        return None
+    except Exception as _ex:
+        return f"Something went wrong — {_ex}"
+
 def _show_access_gate():
     """Email check for approved waitlist users. Calls st.stop()."""
+    # Read localStorage via inline script injected into the main Streamlit page.
+    # If callibr_access is set (user already verified on landing page),
+    # redirect to ?_cauth=<email> so Streamlit can auto-admit without re-entry.
+    st.markdown("""
+<script>
+(function() {
+  var stored = localStorage.getItem('callibr_access');
+  if (stored) {
+    var url = new URL(window.location.href);
+    if (!url.searchParams.get('_cauth')) {
+      url.searchParams.set('_cauth', stored);
+      window.location.replace(url.toString());
+    }
+  }
+})();
+</script>
+""", unsafe_allow_html=True)
+
     st.markdown(f"""
 <style>
 .gate-wrap {{
@@ -414,25 +452,29 @@ def _show_access_gate():
             key="wl_email_access", label_visibility="collapsed"
         )
         if st.button("Enter →", use_container_width=True, key="wl_access_btn"):
-            _e = (_email_acc or "").strip().lower()
-            if not _e or "@" not in _e:
-                st.error("Please enter a valid email address.")
+            _err = _verify_and_admit(_email_acc)
+            if _err:
+                if "pending" in _err:
+                    st.warning(_err)
+                else:
+                    st.error(_err)
             else:
-                try:
-                    _res = (supabase.table("waitlist")
-                            .select("email, approved")
-                            .eq("email", _e)
-                            .execute())
-                    if not _res.data:
-                        st.error("Email not found. Join the waitlist at getcallibr.app first.")
-                    elif not _res.data[0]["approved"]:
-                        st.warning("Your access is pending approval. We'll reach out when you're in.")
-                    else:
-                        st.session_state["user_email"] = _e
-                        st.rerun()
-                except Exception:
-                    st.error("Something went wrong — please try again.")
+                # Cache in localStorage so future visits auto-admit
+                _admitted_email = (_email_acc or "").strip().lower()
+                st.markdown(f"""<script>
+localStorage.setItem('callibr_access', '{_admitted_email}');
+</script>""", unsafe_allow_html=True)
+                st.rerun()
     st.stop()
+
+# Gate: check query param first (auto-login from landing page localStorage redirect)
+if not st.session_state.get("user_email"):
+    _qp_email = st.query_params.get("_cauth", "")
+    if _qp_email:
+        _err = _verify_and_admit(_qp_email)
+        if not _err:
+            st.query_params.clear()
+            st.rerun()
 
 # Gate: require approved waitlist email to access the app
 if not st.session_state.get("user_email"):
@@ -1448,9 +1490,9 @@ st.markdown(f"""
 
 # ── parlay builder helpers ────────────────────────────────────────────────────
 _RISK_BOUNDS = {
-    "Conservative": (0.62, 0.88),
+    "Conservative": (0.65, 0.88),
     "Balanced":     (0.52, 0.88),
-    "Aggressive":   (0.42, 0.85),
+    "Aggressive":   (0.40, 0.85),
 }
 _PARLAY_DOMAINS = [
     "🏀 NBA", "🏒 NHL", "⚾ MLB", "🏈 NFL", "⚽ Soccer",
@@ -1462,65 +1504,112 @@ _PARLAY_DOMAIN_CAT = {
     "₿ Crypto": "Crypto", "🏛 Politics": "Politics & Macro",
     "📈 Tech": "Tech & Markets", "🎭 Entertainment": "Entertainment & Legal",
 }
+# Time horizon → (min_days_to_close, max_days_to_close)
+_HORIZON_BOUNDS = {
+    "Today":      (0,  1),
+    "Tomorrow":   (0,  2),
+    "This Week":  (0,  7),
+    "This Month": (0,  30),
+    "Long Term":  (30, None),
+    "Any":        (0,  None),
+}
 
-def build_parlay(df, cat_avg, stake, target_payout, selected_domains, risk, min_edge=45):
-    """Greedy parlay builder. Returns (list of leg dicts, achieved_multiplier)."""
-    M_required = target_payout / max(stake, 0.01)
-    now_p = pd.Timestamp.now(tz="UTC")
+def _prep_candidates(df, cat_avg, target_cats, now_p, min_days, max_days, prob_min, prob_max, min_edge):
+    """Filter and score the candidate pool for the parlay builder."""
+    close_dt = pd.to_datetime(df["close_time"], errors="coerce", utc=True)
+    time_mask = close_dt > now_p
+    if max_days is not None:
+        time_mask &= close_dt <= (now_p + pd.Timedelta(days=max_days))
+    if min_days > 0:
+        time_mask &= close_dt >= (now_p + pd.Timedelta(days=min_days))
 
-    target_cats = list({_PARLAY_DOMAIN_CAT.get(d, "Sports") for d in selected_domains})
-    candidates = df[
-        df["category"].isin(target_cats) &
-        (pd.to_datetime(df["close_time"], errors="coerce", utc=True) > now_p)
-    ].copy()
+    cands = df[df["category"].isin(target_cats) & time_mask].copy()
+    if cands.empty:
+        return cands
 
-    if "edge_score" not in candidates.columns or candidates["edge_score"].isna().all():
-        candidates["edge_score"] = candidates.apply(
-            lambda r: compute_edge_score(r, cat_avg), axis=1
-        )
-    candidates = candidates[candidates["edge_score"] >= min_edge]
-    if candidates.empty:
-        return [], 1.0
+    if "edge_score" not in cands.columns or cands["edge_score"].isna().all():
+        cands["edge_score"] = cands.apply(lambda r: compute_edge_score(r, cat_avg), axis=1)
 
-    candidates["direction"] = candidates["current_price"].apply(
-        lambda p: "YES" if p >= 0.5 else "NO"
-    )
-    candidates["leg_prob"] = candidates.apply(
+    cands = cands[cands["edge_score"] >= min_edge]
+    if cands.empty:
+        return cands
+
+    cands["direction"] = cands["current_price"].apply(lambda p: "YES" if p >= 0.5 else "NO")
+    cands["leg_prob"]  = cands.apply(
         lambda r: float(r["current_price"]) if r["direction"] == "YES" else float(1 - r["current_price"]),
         axis=1,
     )
+    cands = cands[cands["leg_prob"].between(prob_min, prob_max)]
+    if cands.empty:
+        return cands
 
-    prob_min, prob_max = _RISK_BOUNDS[risk]
-    candidates = candidates[candidates["leg_prob"].between(prob_min, prob_max)]
-    if candidates.empty:
-        return [], 1.0
-
-    candidates["leg_score"] = (
-        candidates["edge_score"] * 0.65
-        + candidates["leg_prob"] * 25.0
-        + candidates.get("snapshot_count", pd.Series(1, index=candidates.index)).clip(0, 10) * 0.8
+    cands["leg_score"] = (
+        cands["edge_score"] * 0.60
+        + cands["leg_prob"] * 20.0
+        + cands.get("snapshot_count", pd.Series(1, index=cands.index)).clip(0, 10) * 0.8
     )
-
-    candidates["_gk_p"] = candidates.apply(
+    cands["_gk_p"] = cands.apply(
         lambda r: extract_game_key_global(r["ticker"], r["event_ticker"]), axis=1
     )
-    candidates = (
-        candidates.sort_values("leg_score", ascending=False)
+    return (
+        cands.sort_values("leg_score", ascending=False)
         .drop_duplicates("_gk_p", keep="first")
     )
 
-    selected, current_mult = [], 1.0
-    for _, row in candidates.iterrows():
-        if current_mult >= M_required:
-            break
-        selected.append(row.to_dict())
-        current_mult *= 1.0 / row["leg_prob"]
+def build_parlay(df, cat_avg, stake, target_payout, selected_domains, risk, time_horizon="Any"):
+    """Greedy parlay builder with two-pass candidate expansion.
+    Returns (legs list, achieved_multiplier, shortfall_pct).
+    Two-pass: strict edge≥40 first; if target not met, fills from relaxed edge≥20 pool."""
+    M_required = target_payout / max(stake, 0.01)
+    now_p      = pd.Timestamp.now(tz="UTC")
 
-    return selected, current_mult
+    target_cats          = list({_PARLAY_DOMAIN_CAT.get(d, "Sports") for d in selected_domains})
+    prob_min, prob_max   = _RISK_BOUNDS[risk]
+    min_days, max_days   = _HORIZON_BOUNDS.get(time_horizon, (0, None))
+
+    # ── Pass 1: strict edge ≥ 40 ──────────────────────────────────────────────
+    pool = _prep_candidates(df, cat_avg, target_cats, now_p, min_days, max_days, prob_min, prob_max, min_edge=40)
+
+    selected, current_mult = [], 1.0
+    used_gks = set()
+    if not pool.empty:
+        for _, row in pool.iterrows():
+            if current_mult >= M_required:
+                break
+            selected.append(row.to_dict())
+            current_mult *= 1.0 / row["leg_prob"]
+            used_gks.add(row["_gk_p"])
+
+    # ── Pass 2: relax to edge ≥ 20 to fill remaining multiplier gap ───────────
+    if current_mult < M_required:
+        pool2 = _prep_candidates(df, cat_avg, target_cats, now_p, min_days, max_days, prob_min, prob_max, min_edge=20)
+        if not pool2.empty:
+            pool2 = pool2[~pool2["_gk_p"].isin(used_gks)]
+            for _, row in pool2.iterrows():
+                if current_mult >= M_required:
+                    break
+                selected.append(row.to_dict())
+                current_mult *= 1.0 / row["leg_prob"]
+                used_gks.add(row["_gk_p"])
+
+    # ── Pass 3: widen time horizon if still short (e.g. "Today" had too few) ──
+    if current_mult < M_required and time_horizon not in ("Any", "Long Term"):
+        pool3 = _prep_candidates(df, cat_avg, target_cats, now_p, 0, None, prob_min, prob_max, min_edge=20)
+        if not pool3.empty:
+            pool3 = pool3[~pool3["_gk_p"].isin(used_gks)]
+            for _, row in pool3.iterrows():
+                if current_mult >= M_required:
+                    break
+                selected.append(row.to_dict())
+                current_mult *= 1.0 / row["leg_prob"]
+                used_gks.add(row["_gk_p"])
+
+    shortfall_pct = max(0.0, (M_required - current_mult) / M_required)
+    return selected, current_mult, shortfall_pct
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab4, tab2, tab_parlay = st.tabs([
-    "📊 Overview", "🔍 Market Research", "🔀 Sources", "🎯 Parlay"
+tab1, tab4, tab2, tab_parlay, tab_backtest = st.tabs([
+    "📊 Overview", "🔍 Market Research", "🔀 Sources", "🎯 Parlay", "🔬 Backtest"
 ])
 
 # ── edge score helpers (defined here so tab1 + tab4 can both use them) ───────
@@ -3634,8 +3723,8 @@ with tab_parlay:
     st.markdown("## 🎯 Parlay Builder")
     st.markdown(
         "<div style='color:#999ea6;font-size:14px;margin-bottom:28px;'>"
-        "Set your stake and target payout. We build the highest-confidence parlay "
-        "from your chosen domains using live edge scores — no two legs from the same game.</div>",
+        "Set your stake, target payout, and how long you're willing to wait. "
+        "We build the highest-confidence parlay from your chosen domains — no two legs from the same game.</div>",
         unsafe_allow_html=True,
     )
 
@@ -3645,6 +3734,13 @@ with tab_parlay:
         _p_stake  = st.number_input("Stake ($)", min_value=1.0, value=50.0, step=5.0, key="p_stake")
     with _pc2:
         _p_target = st.number_input("Target Payout ($)", min_value=2.0, value=500.0, step=25.0, key="p_target")
+
+    _p_horizon = st.select_slider(
+        "Time horizon — how long are you willing to wait for legs to resolve?",
+        options=["Today", "Tomorrow", "This Week", "This Month", "Long Term", "Any"],
+        value="This Week",
+        key="p_horizon",
+    )
 
     _p_domains = st.multiselect(
         "Domains",
@@ -3668,20 +3764,37 @@ with tab_parlay:
             st.warning("Select at least one domain.")
         else:
             _p_cat_avg = df_markets.groupby("category")["price_change_pct"].mean().to_dict()
-            _p_legs, _p_mult = build_parlay(
-                df_markets, _p_cat_avg, _p_stake, _p_target, _p_domains, _p_risk
+            _p_legs, _p_mult, _p_shortfall = build_parlay(
+                df_markets, _p_cat_avg, _p_stake, _p_target, _p_domains, _p_risk,
+                time_horizon=_p_horizon,
             )
-            st.session_state["parlay_built"]      = _p_legs
-            st.session_state["parlay_built_mult"] = _p_mult
-            st.session_state["parlay_built_stake"] = float(_p_stake)
+            st.session_state["parlay_built"]         = _p_legs
+            st.session_state["parlay_built_mult"]    = _p_mult
+            st.session_state["parlay_built_stake"]   = float(_p_stake)
+            st.session_state["parlay_built_shortfall"] = _p_shortfall
 
     # ── generated parlay display ───────────────────────────────────────────────
-    _built_legs = st.session_state.get("parlay_built", [])
-    _built_mult  = st.session_state.get("parlay_built_mult", 1.0)
-    _built_stake = st.session_state.get("parlay_built_stake", float(_p_stake))
+    _built_legs     = st.session_state.get("parlay_built", [])
+    _built_mult     = st.session_state.get("parlay_built_mult", 1.0)
+    _built_stake    = st.session_state.get("parlay_built_stake", float(_p_stake))
+    _built_shortfall = st.session_state.get("parlay_built_shortfall", 0.0)
 
     if _built_legs:
         st.markdown("---")
+
+        # ── shortfall banner ──────────────────────────────────────────────────
+        _target_mult = _p_target / max(_p_stake, 0.01)
+        if _built_shortfall > 0.05:
+            _achieved_payout = _built_stake * _built_mult
+            _gap_payout = _p_target - _achieved_payout
+            st.warning(
+                f"Best available parlay reaches **${_achieved_payout:,.0f}** "
+                f"(×{_built_mult:.2f}) — **${_gap_payout:,.0f} short** of your ${_p_target:,.0f} target.  \n"
+                f"To close the gap: add more domains, switch to **Aggressive** risk, or widen the time horizon."
+            )
+        else:
+            st.success(f"Target reached — estimated payout **${_built_stake * _built_mult:,.0f}** on a ${_built_stake:,.0f} stake.")
+
         st.markdown("### 📋 Your Parlay")
 
         # Leg cards
@@ -3690,16 +3803,24 @@ with tab_parlay:
             _lp   = float(_leg.get("leg_prob", 0.5))
             _ldir = _leg.get("direction", "YES")
             _les  = int(_leg.get("edge_score", 0))
-            _les_color = "#00C2A8" if _les >= 70 else ("#F59E0B" if _les >= 50 else "#6b7280")
-            _dir_color = "#00C2A8" if _ldir == "YES" else "#f90000"
+            _les_color  = "#00C2A8" if _les >= 70 else ("#F59E0B" if _les >= 50 else "#6b7280")
+            _dir_color  = "#00C2A8" if _ldir == "YES" else "#f90000"
             _title_short = str(_leg.get("event_ticker",""))[:58]
-            _sport_lbl = get_sport_label(str(_leg.get("ticker","")), str(_leg.get("event_ticker","")))
+            _sport_lbl  = get_sport_label(str(_leg.get("ticker","")), str(_leg.get("event_ticker","")))
+            # Closes-in label
+            _leg_close = pd.to_datetime(_leg.get("close_time",""), errors="coerce", utc=True)
+            _leg_days  = int((_leg_close - pd.Timestamp.now(tz="UTC")).total_seconds() / 86400) if pd.notna(_leg_close) else None
+            _closes_lbl = (f"{_leg_days}d" if _leg_days is not None and _leg_days >= 0 else "—")
+            _src = str(_leg.get("source",""))
+            _src_dot = "🟣" if _src == "polymarket" else "🔵"
 
             st.markdown(
                 f"""<div style='background:#14181e;border:1px solid #1e2530;padding:12px 16px;margin-bottom:6px;display:flex;align-items:center;gap:12px;'>
   <span style='font-size:10px;color:#4a5060;min-width:20px;'>#{_li+1}</span>
+  <span style='font-size:11px;min-width:16px;'>{_src_dot}</span>
   <span style='font-size:11px;color:#999ea6;min-width:40px;'>{_sport_lbl}</span>
   <span style='flex:1;font-size:12px;color:#eef2f9;'>{_title_short}</span>
+  <span style='font-size:10px;color:#4a5060;min-width:28px;text-align:right;'>{_closes_lbl}</span>
   <span style='padding:2px 8px;border-radius:2px;font-size:9px;font-weight:700;letter-spacing:0.1em;background:{_dir_color}22;color:{_dir_color};border:1px solid {_dir_color}44;'>{_ldir}</span>
   <span style='font-size:11px;color:#eef2f9;min-width:38px;text-align:right;'>{_lp:.0%}</span>
   <span style='font-size:11px;color:#999ea6;min-width:40px;text-align:right;'>×{1/_lp:.2f}</span>
@@ -3720,8 +3841,12 @@ with tab_parlay:
                 for _l in _built_legs:
                     _built_mult *= 1.0 / float(_l.get("leg_prob", 0.5))
                 st.session_state["parlay_built_mult"] = _built_mult
+                st.session_state["parlay_built_shortfall"] = max(
+                    0.0, (_target_mult - _built_mult) / _target_mult
+                )
             else:
                 st.session_state["parlay_built_mult"] = 1.0
+                st.session_state["parlay_built_shortfall"] = 1.0
             st.rerun()
 
         # Summary footer
@@ -3731,6 +3856,7 @@ with tab_parlay:
                 _combined_prob *= float(_l.get("leg_prob", 0.5))
             _avg_edge = sum(int(_l.get("edge_score",0)) for _l in _built_legs) / len(_built_legs)
             _payout   = _built_stake * _built_mult
+            _mult_color = "#00C2A8" if _built_shortfall <= 0.05 else "#F59E0B"
 
             st.markdown(
                 f"""<div style='background:#0f1318;border:1px solid #1e2530;padding:20px 24px;margin-top:12px;'>
@@ -3738,7 +3864,7 @@ with tab_parlay:
     <div><div style='font-size:9px;color:#4a5060;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px;'>Combined Prob</div>
          <div style='font-size:22px;font-weight:700;color:#eef2f9;'>{_combined_prob:.2%}</div></div>
     <div><div style='font-size:9px;color:#4a5060;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px;'>Multiplier</div>
-         <div style='font-size:22px;font-weight:700;color:#00C2A8;'>×{_built_mult:.2f}</div></div>
+         <div style='font-size:22px;font-weight:700;color:{_mult_color};'>×{_built_mult:.2f}</div></div>
     <div><div style='font-size:9px;color:#4a5060;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px;'>Est. Payout</div>
          <div style='font-size:22px;font-weight:700;color:#eef2f9;'>${_payout:,.2f}</div></div>
     <div><div style='font-size:9px;color:#4a5060;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px;'>Avg Edge</div>
@@ -3880,3 +4006,10 @@ with tab_parlay:
         if st.button("🗑 Clear Parlay", key="clear_active_parlay"):
             st.session_state.pop("active_parlay", None)
             st.rerun()
+
+with tab_backtest:
+    render_backtest_tab(
+        supabase_client=supabase,
+        categorize_fn=categorize,
+        compute_edge_fn=compute_edge_score,
+    )
