@@ -2436,12 +2436,40 @@ def fetch_multi_news(market_title, category, player=None, teams=None, sport_hint
 
     return articles[:15]
 
+def fetch_price_history(ticker: str, n: int = 14) -> list:
+    """Fetch last n price snapshots for a ticker from Supabase, returned oldest-first."""
+    try:
+        rows = (supabase.table("market_prices")
+                .select("timestamp,mid_price")
+                .eq("ticker", ticker)
+                .order("timestamp", desc=True)
+                .limit(n)
+                .execute().data)
+        return list(reversed(rows))
+    except Exception:
+        return []
+
+def format_price_history(history: list) -> str:
+    """Format a list of {timestamp, mid_price} dicts into a readable string for Claude."""
+    if not history:
+        return ""
+    lines = []
+    for row in history:
+        ts = str(row.get("timestamp", ""))[:16]
+        try:
+            price = float(row.get("mid_price", 0))
+        except (TypeError, ValueError):
+            continue
+        lines.append(f"  {ts} → {price:.0%}")
+    return "\n".join(lines)
+
 @st.cache_data(ttl=3600)
 def generate_market_research(market_title, current_price, category, edge_score,
                              price_change_pct, news_headlines, today_date="",
                              player_stats_summary="", sport_label="",
                              days_to_close=None, injury_report="",
-                             cross_source_price=None, vegas_prob=None):
+                             cross_source_price=None, vegas_prob=None,
+                             price_history_str=""):
     """Call Claude Sonnet to generate a sharp market research card.
     Now includes: multi-source news (up to 12), injury reports, cross-source gap, Vegas prob."""
     if not ANTHROPIC_API_KEY:
@@ -2486,6 +2514,11 @@ CRITICAL RULES — follow exactly:
 6. Use hard base rates where possible: "Teams trailing 3-0 advance ~2% historically."
 7. narrative_flag = true ONLY if price moved >15% AND nothing in the provided context explains why.
 8. reasoning must be 2-3 sharp sentences citing specific facts from the context. No vague phrases like "market uncertainty."
+9. PRICE ACTION CAUSALITY — You have the full price history above. For any move >5% across that history:
+   (a) Quote the exact figures: "dropped from X% to Y% between [timestamp1] and [timestamp2]"
+   (b) Check whether any news headline is dated within that window and explains the move
+   (c) If no news explains it, state explicitly: "No news catalyst found — this move appears momentum/sentiment-driven"
+   price_action_analysis must contain this analysis. NEVER say "price has declined" without specifying from what to what and over what timeframe from the history.
 
 Return ONLY valid JSON:
 {{
@@ -2498,17 +2531,25 @@ Return ONLY valid JSON:
   "key_risk": "<single most specific factor that could flip this verdict>",
   "base_rate": "<one hard historical stat, or N/A>",
   "narrative_flag": true | false,
-  "narrative_flag_reason": "<one sentence if flag is true, else empty string>"
+  "narrative_flag_reason": "<one sentence if flag is true, else empty string>",
+  "price_action_analysis": "<1-2 sentences: exact move from history with timestamps, and whether any news headline explains it>",
+  "shareable_insight": "<2-3 sentence plain English take: '[Market] sits at X%. [Price action causality in plain language]. [Edge/verdict statement with specific figures.]>"
 }}"""
 
     stats_block = f"\nRecent team/player stats (use as primary form indicator):\n{player_stats_summary}" if player_stats_summary else ""
     sport_block = f"\nSport: {sport_label}" if sport_label else ""
 
+    price_history_block = (
+        f"Price history (oldest → newest):\n{price_history_str}"
+        if price_history_str
+        else f"Price change: {price_change_pct:+.1f}% since tracking began (no snapshot history available)"
+    )
+
     prompt = f"""Market: {market_title}
 Current probability: {current_price:.1%}
 Category: {category}{sport_block}
 Edge score: {edge_score}/100
-Price change: {price_change_pct:+.1f}% since tracking began
+{price_history_block}
 Today's date: {today}
 {injury_block}{cross_block}{vegas_block}
 {stats_block}
@@ -2551,6 +2592,8 @@ Assess this market now. Remember: rely only on the provided context, not your tr
         result.setdefault("base_rate", "N/A")
         result.setdefault("narrative_flag", False)
         result.setdefault("narrative_flag_reason", "")
+        result.setdefault("price_action_analysis", "")
+        result.setdefault("shareable_insight", "")
         return result
     except requests.exceptions.Timeout:
         return {"_error": "API request timed out (>30s). Try again."}
@@ -2731,6 +2774,8 @@ def render_research_card(row, research, news, edge_score, df_all):
         bull = research.get("bull_case", min(0.99, fv + 0.12))
         narrative_flag = research.get("narrative_flag", False)
         narrative_reason = research.get("narrative_flag_reason", "")
+        price_action_analysis = research.get("price_action_analysis", "")
+        shareable_insight = research.get("shareable_insight", "")
 
         # Liquidity assessment
         snap = row.get("snapshot_count", 1)
@@ -2818,7 +2863,10 @@ def render_research_card(row, research, news, edge_score, df_all):
     <div style="font-size:10px;color:#999ea6;margin-top:2px;">{liq_desc}</div>
   </div>
 </div>
-{data_warning_html}{narrative_html}"""
+{data_warning_html}{narrative_html}{f'''<div style="background:#0d1117;border:1px solid #1e2530;border-left:3px solid #636870;border-radius:1px;padding:14px;margin-bottom:12px;">
+  <div style="font-size:10px;color:#999ea6;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px;">📉 Price Action</div>
+  <div style="font-size:12px;color:#c5cad3;">{price_action_analysis}</div>
+</div>''' if price_action_analysis else ""}"""
     else:
         verdict_html = f"""
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
@@ -3353,7 +3401,10 @@ with tab4:
         )
         # Parse actual game dates (Kalshi NBA markets close ~14 days after game day)
         _today_norm = pd.Timestamp.now().normalize()
-        game_meta["game_date"]   = game_meta.index.map(parse_game_date)
+        _raw_dates = pd.to_datetime(game_meta.index.map(parse_game_date), errors="coerce")
+        if _raw_dates.dt.tz is not None:
+            _raw_dates = _raw_dates.dt.tz_localize(None)
+        game_meta["game_date"]   = _raw_dates
         game_meta["days_to_game"] = (game_meta["game_date"] - _today_norm).dt.days
         # Sort by game/event date first, fall back to market close date, then edge score
         game_meta["_sort_key"] = game_meta["days_to_game"].where(
@@ -3576,8 +3627,12 @@ with tab4:
                                 st.markdown(st.session_state["research_card"], unsafe_allow_html=True)
                                 if st.session_state.get("research_sports"):
                                     st.markdown(st.session_state["research_sports"], unsafe_allow_html=True)
+                                _si = st.session_state.get("shareable_insight", "")
+                                if _si:
+                                    st.markdown("**Callibr Take** — copy to post:")
+                                    st.code(_si, language=None)
                                 if st.button("✕ Clear", key=f"clear_dr_{bet['ticker']}"):
-                                    for _k in ("research_card", "research_sports", "dr_ticker_result"):
+                                    for _k in ("research_card", "research_sports", "dr_ticker_result", "shareable_insight"):
                                         st.session_state.pop(_k, None)
 
         if _upcoming_keys.any():
@@ -3685,6 +3740,8 @@ with tab4:
                         )
 
                     import datetime as _dt2
+                    _dr_price_hist = fetch_price_history(_dr_row["ticker"])
+                    _dr_price_hist_str = format_price_history(_dr_price_hist)
                     _dr_research = generate_market_research(
                         market_title=_dr_row["event_ticker"],
                         current_price=_dr_row["current_price"],
@@ -3698,13 +3755,15 @@ with tab4:
                         days_to_close=_dr_row.get("days_to_close"),
                         injury_report=_dr_injury_str,
                         cross_source_price=_dr_row.get("cross_source_price"),
+                        price_history_str=_dr_price_hist_str,
                     )
                 if _dr_research and _dr_research.get("_error"):
                     st.error(f"⚠️ AI verdict failed: {_dr_research['_error']}")
                     _dr_research = None
-                st.session_state["research_card"]    = render_research_card(_dr_row, _dr_research, _dr_news, _dr_edge, df_markets)
-                st.session_state["research_sports"]  = render_stats_card(_dr_stats) if _dr_stats else ""
-                st.session_state["dr_ticker_result"] = _dr_ticker
+                st.session_state["research_card"]      = render_research_card(_dr_row, _dr_research, _dr_news, _dr_edge, df_markets)
+                st.session_state["research_sports"]    = render_stats_card(_dr_stats) if _dr_stats else ""
+                st.session_state["dr_ticker_result"]   = _dr_ticker
+                st.session_state["shareable_insight"]  = (_dr_research or {}).get("shareable_insight", "")
             st.session_state["dr_ticker"] = None
             st.rerun()
 
